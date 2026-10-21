@@ -1,0 +1,12 @@
+.env
+.venv/
+venv/
+__pycache__/
+*.pyc
+node_modules/
+dist/
+chroma_db/
+conversations/
+*.gguf
+*.safetensors
+.DS_Store

@@ -1,6 +1,5 @@
 """FastAPI wrapper around the REAL run_agent() in step4_agent_loop.py.
-Run from the project root:  uvicorn backend.main:app --port 8000
-step4_agent_loop.py is NOT modified."""
+Run from the project root:  uvicorn backend.main:app --port 8000"""
 
 from typing import Literal, Optional
 import os, re, secrets, threading, logging
@@ -13,6 +12,9 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
 load_dotenv()
+# Flashcards and quizzes are returned to the user as-is, so tool results need more room than the 4000 default.
+# (Set MAX_TOOL_RESULT_CHARS in .env to override.) Must be set BEFORE tools_registry is imported.
+os.environ.setdefault("MAX_TOOL_RESULT_CHARS", "12000")
 log = logging.getLogger("backend")
 
 OLLAMA = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434").rstrip("/")
@@ -28,6 +30,15 @@ import step4_agent_loop as agent  # safe: CLI is under __main__ guard
 from conversation_store import save_conversation, load_conversation, list_conversations
 from tools_registry import make_ctx
 from files_api import create_router
+
+# Study Companion: importing this module registers its tools (load_pdf, search_documents, ...).
+# If a package is missing the backend still starts; only the Study module is switched off.
+try:
+    import study_companion.study_tools  # noqa: F401
+    STUDY_OK, STUDY_ERROR = True, ""
+except Exception as e:  # noqa: BLE001
+    STUDY_OK, STUDY_ERROR = False, f"{type(e).__name__}: {e}"
+    log.exception("Study Companion could not be loaded")
 
 agent.url = f"{OLLAMA}/api/chat"  # env-configurable Ollama URL
 agent.MODEL = MODEL               # and the model name
@@ -78,11 +89,19 @@ def health():
 
 @app.get("/api/modules", dependencies=[Depends(auth)])
 def modules():
+    if STUDY_OK:
+        study = {"id": "study", "name": "Study Companion", "available": True,
+                 "note": "Upload a PDF, ask questions about it, and get flashcards or a quiz. "
+                         "Tools: load_pdf, search_documents, list_documents, generate_flashcards, create_quiz."}
+    else:
+        study = {"id": "study", "name": "Study Companion", "available": False,
+                 "note": "Could not start. On the server run: pip install -r requirements.txt  "
+                         f"(error: {STUDY_ERROR[:120]})"}
     return [
         {"id": "chat", "name": "AI Chat (run_agent)", "available": True,
          "note": "Tools: get_weather, calculate, search_old_conversations."},
         {"id": "history", "name": "Conversation history", "available": True, "note": "Uses conversation_store."},
-        {"id": "study", "name": "Study Companion", "available": False, "note": "Not wired yet: no study tool is registered in step4_agent_loop.py."},
+        study,
         {"id": "data", "name": "Data Analysis", "available": False, "note": "Not implemented in the agent yet."},
         {"id": "code", "name": "Code Documentation", "available": False, "note": "Not implemented in the agent yet."},
         {"id": "pay", "name": "x402 Payments", "available": False, "note": "Not implemented. No payments are made."},

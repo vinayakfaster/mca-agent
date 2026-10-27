@@ -1,0 +1,9 @@
+fastapi
+uvicorn
+requests
+pypdf
+chromadb
+openpyxl
+pandas
+matplotlib
+python-multipart

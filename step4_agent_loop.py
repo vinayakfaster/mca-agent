@@ -1,139 +1,196 @@
-import requests
+import ast
 import json
+import logging
+import operator
+import os
 import re
 from datetime import datetime
+
+import requests
+
 from conversation_store import save_conversation, load_conversation, list_conversations
+from tools_registry import register, get_tools, call_tool, make_ctx
 
-url = "http://localhost:11434/api/chat"
+log = logging.getLogger("agent")
 
-tools = [
-    {
-        "type": "function",
-        "function": {
-            "name": "get_weather",
-            "description": "Get the current real-time weather for a given city. Returns only the temperature.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "city": {"type": "string", "description": "The name of the city"}
-                },
-                "required": ["city"]
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "search_old_conversations",
-            "description": (
-                "Search the user's PREVIOUS chat sessions (not this current conversation) "
-                "for information discussed earlier. Use this ONLY when the user refers to "
-                "something from a past/older session, e.g. 'pichli baar maine kya poocha tha', "
-                "'what did I ask before', 'my last conversation about X'. "
-                "Do NOT use this for anything already visible in the current conversation."
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "query": {"type": "string", "description": "Keyword(s) to search for, e.g. 'weather', 'Delhi'"}
-                },
-                "required": ["query"]
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "calculate",
-            "description": "Evaluate a basic math expression using ONLY plain numbers, e.g. '25 + 4'. Never put a function call or city name inside this - only numbers you already have.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "expression": {"type": "string", "description": "A math expression using only numbers, e.g. '25.1 + 28.3'"}
-                },
-                "required": ["expression"]
-            }
-        }
-    }
-]
+url = os.getenv("OLLAMA_URL", "http://localhost:11434/api/chat")
+MODEL = os.getenv("OLLAMA_MODEL", "qwen3:8b")
+OLLAMA_TIMEOUT = float(os.getenv("OLLAMA_TIMEOUT", "300"))   # local models can be slow
+HTTP_TIMEOUT = 15                                            # weather lookups
 
+
+# ---------------------------------------------------------------------------
+# "Should this tool be offered for this message?" checks (keyword gates).
+# Defined first because the @register lines below use them.
+# ---------------------------------------------------------------------------
+
+def user_wants_calculation(user_message):
+    """
+    True if the user asked for maths/comparison: either a keyword ("add", "calculate", "jod"...)
+    or a "number operator number" pattern such as "25 + 17" (no keyword needed).
+    """
+    calculation_keywords = [
+        "add", "sum", "total", "combined", "plus", "minus", "subtract",
+        "multiply", "divide", "calculate", "compare", "difference",
+        "average", "percent", "jod", "ghata", "guna", "compare"
+    ]
+    message_lower = user_message.lower()
+    has_keyword = any(keyword in message_lower for keyword in calculation_keywords)
+    has_math_symbol = bool(re.search(r"\d+\s*[\+\-\*/]\s*\d+", user_message))
+    return has_keyword or has_math_symbol
+
+
+def user_wants_old_search(user_message):
+    """True if the user is asking about a PAST/older chat (not the current one)."""
+    old_chat_keywords = [
+        "pichli baar", "pichhli baar", "purani", "purana", "purane",
+        "pehle", "previously", "last time", "last session", "last chat",
+        "old chat", "old conversation", "past conversation", "before this"
+    ]
+    message_lower = user_message.lower()
+    return any(keyword in message_lower for keyword in old_chat_keywords)
+
+
+# ---------------------------------------------------------------------------
+# TOOLS  (to add one: write the function, put @register above it - that is all)
+# ---------------------------------------------------------------------------
+
+@register(
+    name="get_weather",
+    description="Get the current real-time weather for a given city. Returns the temperature and humidity.",
+    properties={"city": {"type": "string", "description": "The name of the city"}},
+    required=["city"],
+)
 def get_weather(city):
-    geo_url = "https://geocoding-api.open-meteo.com/v1/search"
-    geo_response = requests.get(geo_url, params={"name": city, "count": 1})
-    geo_data = geo_response.json()
+    try:
+        geo_response = requests.get("https://geocoding-api.open-meteo.com/v1/search",
+                                    params={"name": city, "count": 1}, timeout=HTTP_TIMEOUT)
+        geo_response.raise_for_status()
+        geo_data = geo_response.json()
 
-    if "results" not in geo_data or len(geo_data["results"]) == 0:
-        return f"'{city}' naam ka shehar nahi mila."
+        if "results" not in geo_data or len(geo_data["results"]) == 0:
+            return f"'{city}' naam ka shehar nahi mila."
 
-    lat = geo_data["results"][0]["latitude"]
-    lon = geo_data["results"][0]["longitude"]
+        lat = geo_data["results"][0]["latitude"]
+        lon = geo_data["results"][0]["longitude"]
 
-    weather_url = "https://api.open-meteo.com/v1/forecast"
-    weather_response = requests.get(weather_url, params={
-        "latitude": lat,
-        "longitude": lon,
-        "current": "temperature_2m,relative_humidity_2m,weather_code"
-    })
-    weather_data = weather_response.json()
+        weather_response = requests.get("https://api.open-meteo.com/v1/forecast", params={
+            "latitude": lat,
+            "longitude": lon,
+            "current": "temperature_2m,relative_humidity_2m,weather_code"
+        }, timeout=HTTP_TIMEOUT)
+        weather_response.raise_for_status()
+        weather_data = weather_response.json()
 
-    temp = weather_data["current"]["temperature_2m"]
-    humidity = weather_data["current"]["relative_humidity_2m"]
+        temp = weather_data["current"]["temperature_2m"]
+        humidity = weather_data["current"]["relative_humidity_2m"]
+        return f"The temperature in {city} is exactly {temp} degrees Celsius, humidity {humidity}%."
+    except requests.RequestException:
+        return f"Could not fetch the weather for '{city}' right now (weather service unreachable)."
 
-    return f"The temperature in {city} is exactly {temp} degrees Celsius, humidity {humidity}%."
 
+# Safe maths: parse the expression into a tree and allow only numbers and + - * / // % **.
+# This replaces eval(), which could be frozen by input like 9**9**9**9.
+_BIN_OPS = {ast.Add: operator.add, ast.Sub: operator.sub, ast.Mult: operator.mul,
+            ast.Div: operator.truediv, ast.FloorDiv: operator.floordiv, ast.Mod: operator.mod,
+            ast.Pow: operator.pow}
+_UNARY_OPS = {ast.UAdd: operator.pos, ast.USub: operator.neg}
+
+
+def _eval_node(node):
+    if isinstance(node, ast.Expression):
+        return _eval_node(node.body)
+    if isinstance(node, ast.Constant) and isinstance(node.value, (int, float)) and not isinstance(node.value, bool):
+        return node.value
+    if isinstance(node, ast.UnaryOp) and type(node.op) in _UNARY_OPS:
+        return _UNARY_OPS[type(node.op)](_eval_node(node.operand))
+    if isinstance(node, ast.BinOp) and type(node.op) in _BIN_OPS:
+        left, right = _eval_node(node.left), _eval_node(node.right)
+        if isinstance(node.op, ast.Pow) and abs(right) > 100:
+            raise ValueError("exponent too large (max 100)")
+        result = _BIN_OPS[type(node.op)](left, right)
+        if isinstance(result, int) and result.bit_length() > 4096:
+            raise ValueError("result too large")
+        return result
+    raise ValueError("only plain numbers and + - * / // % ** ( ) are allowed")
+
+
+@register(
+    name="calculate",
+    description=("Evaluate a basic math expression using ONLY plain numbers, e.g. '25 + 4'. "
+                 "Never put a function call or city name inside this - only numbers you already have."),
+    properties={"expression": {"type": "string", "description": "A math expression using only numbers, e.g. '25.1 + 28.3'"}},
+    required=["expression"],
+    when=user_wants_calculation,
+)
 def calculate(expression):
     try:
-        allowed_chars = set("0123456789+-*/(). ")
-        if not all(c in allowed_chars for c in expression):
-            return "Invalid expression - only plain numbers and + - * / ( ) allowed. Do not put function calls or text inside."
-        result = eval(expression)
+        if len(expression) > 200:
+            return "Invalid expression - too long."
+        result = _eval_node(ast.parse(expression.strip(), mode="eval"))
+        if isinstance(result, float):
+            result = round(result, 10)
         return f"Result: {result}"
-    except Exception as e:
-        return f"Error calculating: {e}"
+    except ZeroDivisionError:
+        return "Error calculating: division by zero."
+    except (ValueError, SyntaxError, OverflowError, RecursionError) as e:
+        return f"Invalid expression - {e}. Use only plain numbers and + - * / ( )."
 
-def search_old_conversations(user_id, current_conversation_id, query):
-    """
-    User ki SAARI purani conversation files (current session ko chhod ke) mein
-    'query' keyword dhoondhta hai. Filing-cabinet analogy: har purani file (drawer)
-    kholte hain, har user/assistant message check karte hain - kya query ka
-    koi word usme mila? Agar mila, woh line result mein daal dete hain.
-    """
+
+@register(
+    name="search_old_conversations",
+    description=(
+        "Search the user's PREVIOUS chat sessions (not this current conversation) "
+        "for information discussed earlier. Use this ONLY when the user refers to "
+        "something from a past/older session, e.g. 'pichli baar maine kya poocha tha', "
+        "'what did I ask before', 'my last conversation about X'. "
+        "Do NOT use this for anything already visible in the current conversation."
+    ),
+    properties={"query": {"type": "string", "description": "Keyword(s) to search for, e.g. 'weather', 'Delhi'"}},
+    required=["query"],
+    needs_ctx=True,                    # gets ctx["user_id"] and ctx["conversation_id"] automatically
+    when=user_wants_old_search,
+)
+def search_old_conversations(query, ctx):
+    """Search every other saved chat of this user for `query` (the current chat is skipped)."""
+    user_id, current_conversation_id = ctx["user_id"], ctx.get("conversation_id")
     query_lower = query.lower()
     matches = []
 
     for conv_id in list_conversations(user_id):
         if conv_id == current_conversation_id:
-            continue  # abhi ki chat khud ko search karne ki zaroorat nahi
-
-        past_messages = load_conversation(user_id, conv_id)
-        for msg in past_messages:
+            continue
+        for msg in load_conversation(user_id, conv_id):
             role = msg.get("role")
             content = msg.get("content") or ""
             if role in ("user", "assistant") and query_lower in content.lower():
-                # itna hi rakhte hain taaki context window mein zyada jagah na le
-                snippet = content[:200]
-                matches.append(f"[{conv_id}] {role}: {snippet}")
+                matches.append(f"[{conv_id}] {role}: {content[:200]}")
 
     if not matches:
         return f"'{query}' ke baare mein koi purani conversation nahi mili."
+    return "\n".join(matches[:5])      # top 5 only, so the context window does not fill up
 
-    # sirf top 5 matches wapas bhejo, warna context bhar jaayega
-    return "\n".join(matches[:5])
 
+# Older code could bind tools at runtime with  tool_functions["name"] = callable.
+# That still works (it overrides the registry), but you should not need it any more.
+tool_functions = {}
+
+
+# ---------------------------------------------------------------------------
+# Context-window management (unchanged logic)
+# ---------------------------------------------------------------------------
 
 MAX_MESSAGES = 16   # thoda badhaya - summarization kam frequent ho, drift kam ho
-KEEP_RECENT = 8       # yeh aakhri N messages hamesha as-is rakho, summarize mat karo
+KEEP_RECENT = 8     # yeh aakhri N messages hamesha as-is rakho, summarize mat karo
 
 SUMMARY_TAG = "[Condensed history of THIS SAME current chat, for context]"
 
 
 def summarize_old_messages(old_messages, previous_summary=None):
     """
-    Purane messages ko ek chhoti summary mein convert karta hai.
-    NAYA: agar 'previous_summary' diya gaya hai (matlab yeh dusri/teesri baar
-    summarize ho raha hai), toh use bhi text mein explicitly shaamil karte hain,
-    aur model ko saaf-saaf bolte hain "iske saare facts zaroor rakhna" -
-    isse "summary ki summary ki summary" mein info kho jaane ka bug (drift) rukta hai.
+    Turns old messages into one short summary. If a previous summary exists it is passed in
+    explicitly and the model is told to keep all its facts - this stops the
+    "summary of a summary of a summary" drift bug.
     """
     text_parts = []
 
@@ -144,7 +201,7 @@ def summarize_old_messages(old_messages, previous_summary=None):
         role = m.get("role")
         content = m.get("content") or ""
         if not content:
-            continue  # tool_calls wale assistant messages ka content khaali hota hai, skip
+            continue  # assistant messages that only hold tool_calls have empty content
         if role == "tool":
             text_parts.append(f"[tool result]: {content}")
         else:
@@ -164,113 +221,54 @@ def summarize_old_messages(old_messages, previous_summary=None):
     )
 
     payload = {
-        "model": "qwen3:8b",
+        "model": MODEL,
         "messages": [{"role": "user", "content": summary_prompt}],
         "stream": False,
         "think": False,
         "options": {"temperature": 0.2}
     }
-    response = requests.post(url, json=payload)
+    response = requests.post(url, json=payload, timeout=OLLAMA_TIMEOUT)
+    response.raise_for_status()
     return response.json()["message"]["content"]
 
 
 def manage_context_window(messages):
     """
-    Agar messages list bahut badi ho jaaye, purane hisse ko summarize karke
-    ek chhoti summary-message se replace kar deta hai.
-    System prompt (index 0) kabhi touch nahi hota.
-
-    NAYA: agar index 1 pe pehle se hi ek summary-message maujood hai
-    (matlab yeh pehli baar nahi, dusri/teesri baar summarize ho raha hai),
-    toh us purani summary ko "previous_summary" ke roop mein alag nikaal lete
-    hain aur summarizer ko explicitly dete hain - taaki woh naya summary
-    banate waqt purane facts na bhool jaaye (drift bug ka fix).
+    If the message list gets long, replace the older part with one short summary message.
+    The system prompt (index 0) is never touched. If index 1 is already one of our summary
+    messages, its text is passed on as previous_summary so no facts are lost.
     """
     if len(messages) <= MAX_MESSAGES:
-        return messages  # abhi chhoti hai, kuch karne ki zaroorat nahi
+        return messages
 
     system_msg = messages[0]
 
     previous_summary = None
     start_index = 1
 
-    # check karo: kya index 1 pehle se hi hamari summary-message hai?
     if len(messages) > 1:
         second_msg = messages[1]
         if second_msg.get("role") == "system" and SUMMARY_TAG in (second_msg.get("content") or ""):
             previous_summary = second_msg["content"].replace(f"{SUMMARY_TAG}: ", "")
-            start_index = 2  # is purani summary ko dobara "old_messages" mein mat gino
+            start_index = 2
 
-    old_messages = messages[start_index:-KEEP_RECENT]     # yeh naye-purane summarize honge
-    recent_messages = messages[-KEEP_RECENT:]              # yeh as-is rahenge
+    old_messages = messages[start_index:-KEEP_RECENT]
+    recent_messages = messages[-KEEP_RECENT:]
 
-    print(f"\n[INFO] Context bada ho gaya ({len(messages)} messages) - purane {len(old_messages)} messages summarize kar raha hoon...")
+    log.info("Context is long (%d messages) - summarizing the oldest %d", len(messages), len(old_messages))
     summary_text = summarize_old_messages(old_messages, previous_summary)
-    print(f"[INFO] Summary bani: {summary_text}\n")
 
-    summary_message = {
-        "role": "system",
-        "content": f"{SUMMARY_TAG}: {summary_text}"
-    }
-
+    summary_message = {"role": "system", "content": f"{SUMMARY_TAG}: {summary_text}"}
     return [system_msg, summary_message] + recent_messages
 
 
-def user_wants_calculation(user_message):
-    """
-    Check karta hai ki user ne calculation/math/comparison explicitly maanga hai ya nahi.
-    Do tareeke se check karta hai:
-    1. Keywords ("add", "calculate", "jod", waghera)
-    2. NAYA: Regex - agar message mein "number + operator + number" pattern hai
-       (jaise "25 + 17"), toh woh bhi calculation hai, chahe koi keyword na ho.
-       Yeh bug-fix hai: "what is 25 + 17" mein koi keyword nahi thi, isliye
-       calculate tool available hi nahi hota tha - eval harness ne yeh pakda.
-    """
-    calculation_keywords = [
-        "add", "sum", "total", "combined", "plus", "minus", "subtract",
-        "multiply", "divide", "calculate", "compare", "difference",
-        "average", "percent", "jod", "ghata", "guna", "compare"
-    ]
-    message_lower = user_message.lower()
+# ---------------------------------------------------------------------------
+# Per-conversation fact tracker.
+# FIX: this used to be ONE global set, so on a server with several users, cities one user
+# asked about leaked into everybody else's prompts. Now it is keyed by conversation.
+# ---------------------------------------------------------------------------
 
-    has_keyword = any(keyword in message_lower for keyword in calculation_keywords)
-
-    # pattern: ek ya zyada digit, optional spaces, ek operator (+-*/), spaces, digit(s)
-    has_math_symbol = bool(re.search(r"\d+\s*[\+\-\*/]\s*\d+", user_message))
-
-    return has_keyword or has_math_symbol
-
-
-def user_wants_old_search(user_message):
-    """
-    Check karta hai ki user PURANI/PICHLI conversation ke baare mein poochh raha hai ya nahi.
-    Isse hum search_old_conversations tool ko sirf zaroorat pade tabhi model ko dikhate hain -
-    baaki (normal) messages mein yeh tool bilkul available hi nahi hoga, isliye model
-    galti se bhi use call nahi kar payega jab zaroorat na ho.
-    """
-    old_chat_keywords = [
-        "pichli baar", "pichhli baar", "purani", "purana", "purane",
-        "pehle", "previously", "last time", "last session", "last chat",
-        "old chat", "old conversation", "past conversation", "before this"
-    ]
-    message_lower = user_message.lower()
-    return any(keyword in message_lower for keyword in old_chat_keywords)
-
-tool_functions = {
-    "get_weather": get_weather,
-    "calculate": calculate
-    # "search_old_conversations" yahan nahi hai - kyunki usko user_id aur
-    # current conversation_id chahiye, jo model ko pata nahi hote.
-    # Isko __main__ mein runtime par is dict mein add karenge (neeche dekho).
-}
-
-# NAYA: yeh ek DETERMINISTIC (LLM-independent) tracker hai. Jab bhi get_weather
-# successfully call hoti hai, uski city yahan add hoti hai - plain Python set mein,
-# koi LLM guess-work nahi. Yeh summarization ke bug (facts drop/mix ho jaana) se
-# bilkul immune hai kyunki isme AI ka koi role nahi, sirf code hai.
-session_facts = {
-    "queried_cities": set()
-}
+_cities_by_conversation = {}
 
 SYSTEM_PROMPT = (
     "You are a careful agent that uses tools step by step. "
@@ -282,8 +280,8 @@ SYSTEM_PROMPT = (
     "4. Never invent, guess, or assume any number that wasn't explicitly given to you in a tool result. "
     "5. If the user asks about something from a PAST/OLDER SESSION (a different, previous chat, not this one), "
     "use the search_old_conversations tool. "
-    "6. Any message labeled '[Earlier conversation summary]' is part of THIS SAME CURRENT conversation - "
-    "it has just been condensed to save space. Read it directly to answer questions about what was "
+    "6. Any message labeled '[Condensed history of THIS SAME current chat, for context]' is part of THIS SAME CURRENT "
+    "conversation - it has just been condensed to save space. Read it directly to answer questions about what was "
     "discussed earlier in THIS chat. Do NOT call search_old_conversations for information that is "
     "already visible to you in this summary or in the messages above. "
     "7. If the user asks for multiple items (e.g. weather for several cities), you must keep calling "
@@ -293,50 +291,42 @@ SYSTEM_PROMPT = (
     "Only write your final text answer after every requested item has been fetched via a tool call."
 )
 
-def run_agent(messages, user_message, max_turns=8):
-    # check karo ki calculation aur/ya old-conversation-search chahiye ya nahi
-    # (sirf is user_message ke keywords ke basis pe) - dono tools by-default
-    # HATA diye jaate hain, sirf zaroorat lagne par wapas jode jaate hain.
-    available_tools = [
-        t for t in tools
-        if t["function"]["name"] not in ("calculate", "search_old_conversations")
-    ]
 
-    if user_wants_calculation(user_message):
-        calc_tool = next(t for t in tools if t["function"]["name"] == "calculate")
-        available_tools.append(calc_tool)
+def run_agent(messages, user_message, max_turns=8, module=None, ctx=None):
+    """
+    module: which frontend tab is active ("study", "data", "code", "pay") or None.
+            "general" tools are always offered; a module's tools only when it is active.
+    ctx:    make_ctx(user_id, conversation_id, module) - needed by tools that read the
+            user's files or past chats. Optional, so older callers keep working.
+    """
+    available_tools = get_tools(module, user_message)
 
-    if user_wants_old_search(user_message):
-        search_tool = next(t for t in tools if t["function"]["name"] == "search_old_conversations")
-        available_tools.append(search_tool)
-
-    # messages bahar se aa rahi hai (poori history ke saath), hum bas naya user turn append karte hain.
     messages.append({"role": "user", "content": user_message})
 
-    # NAYA: context bahut bada ho gaya toh purana hissa summarize kar do.
-    # messages[:] = ... IMPORTANT hai: yeh list ke ANDAR ka content replace karta hai,
-    # list ka address (id) same rehta hai - isliye __main__ mein jo "messages"
-    # variable hai woh bhi updated content dekhega (reference wahi rehta hai).
-    messages[:] = manage_context_window(messages)
+    # messages[:] = ... replaces the list's CONTENT, so the caller's variable sees the update.
+    try:
+        messages[:] = manage_context_window(messages)
+    except requests.RequestException:
+        log.exception("Summarizing failed; continuing with the full history")
+
+    facts_key = (ctx or {}).get("conversation_id") or "default"
+    cities = _cities_by_conversation.setdefault(facts_key, set())
 
     for turn in range(max_turns):
-        print(f"\n--- TURN {turn + 1} ---")
+        log.info("--- TURN %d ---", turn + 1)
 
-        # NAYA: har baar API ko call karne se pehle, tracked facts ko taaza
-        # ek chhoti system-message mein daal dete hain. Yeh 'messages' list mein
-        # PERMANENTLY save nahi hoti (isliye save_conversation() mein duplicate
-        # nahi banegi) - sirf isi API call ke liye temporarily jodi jaati hai.
+        # The tracked facts are added for this one API call only and are NOT saved in `messages`.
         payload_messages = messages
-        if session_facts["queried_cities"]:
-            cities_list = ", ".join(sorted(session_facts["queried_cities"]))
+        if cities:
             facts_message = {
                 "role": "system",
-                "content": f"[Reliable fact - do not doubt this]: Cities whose weather has been checked so far in this chat: {cities_list}."
+                "content": "[Reliable fact - do not doubt this]: Cities whose weather has been checked so far in this chat: "
+                           + ", ".join(sorted(cities)) + "."
             }
             payload_messages = messages + [facts_message]
 
         payload = {
-            "model": "qwen3:8b",
+            "model": MODEL,
             "messages": payload_messages,
             "tools": available_tools,
             "stream": False,
@@ -346,8 +336,13 @@ def run_agent(messages, user_message, max_turns=8):
                 "repeat_penalty": 1.2
             }
         }
-        response = requests.post(url, json=payload)
-        assistant_message = response.json()["message"]
+        try:
+            response = requests.post(url, json=payload, timeout=OLLAMA_TIMEOUT)
+            response.raise_for_status()
+            assistant_message = response.json()["message"]
+        except requests.RequestException:
+            log.exception("Ollama request failed")
+            return "I could not reach the language model (Ollama). Please check that it is running and try again."
 
         messages.append(assistant_message)
 
@@ -356,103 +351,82 @@ def run_agent(messages, user_message, max_turns=8):
 
             for call in assistant_message["tool_calls"]:
                 tool_name = call["function"]["name"]
-                tool_args = call["function"]["arguments"]
+                tool_args = call["function"].get("arguments", {})
 
-                call_signature = (tool_name, json.dumps(tool_args, sort_keys=True))
+                call_signature = (tool_name, json.dumps(tool_args, sort_keys=True, default=str))
                 if call_signature in already_called:
-                    print(f"Duplicate call skip kiya: {tool_name}({tool_args})")
+                    log.info("Skipped duplicate call: %s(%s)", tool_name, tool_args)
                     continue
-
                 already_called.add(call_signature)
 
-                print(f"Model ne maanga: {tool_name}({tool_args})")
-                func = tool_functions[tool_name]
-                result = func(**tool_args)
-                print(f"Real result mila: {result}")
+                log.info("Model asked for: %s(%s)", tool_name, tool_args)
+                result = call_tool(tool_name, tool_args, ctx=ctx, overrides=tool_functions)
+                log.info("Tool result: %s", result[:200])
 
-                # NAYA: agar get_weather successfully chali (error nahi aaya), toh
-                # city ka naam humare deterministic tracker mein daal do - yeh
-                # summarization se bilkul alag/safe hai, kyunki isme LLM shaamil nahi.
-                if tool_name == "get_weather" and "naam ka shehar nahi mila" not in str(result):
-                    city_name = tool_args.get("city", "").strip().title()
+                # Deterministic tracker (no LLM): remember cities whose weather really came back.
+                if tool_name == "get_weather" and result.startswith("The temperature in") and isinstance(tool_args, dict):
+                    city_name = str(tool_args.get("city", "")).strip().title()
                     if city_name:
-                        session_facts["queried_cities"].add(city_name)
+                        cities.add(city_name)
 
-                messages.append({
-                    "role": "tool",
-                    "content": str(result)
-                })
+                messages.append({"role": "tool", "tool_name": tool_name, "content": result})
 
             continue
 
         else:
-            final_text = assistant_message["content"]
+            final_text = assistant_message.get("content") or ""
 
             stripped = final_text.strip()
             if stripped.startswith("{") and '"name"' in stripped and '"parameters"' in stripped:
-                print("\n[CHETAVNI] Model ne tool call ko text mein likha, real tool call nahi kiya.")
-                print(f"Raw text: {stripped}")
+                log.warning("Model wrote a tool call as text instead of calling it: %s", stripped[:200])
                 return (
                     "Mujhe iska poora jawaab nahi mil paaya - model confuse ho gaya. "
                     "Kripya sawaal ko aur simple/step-by-step tareeke se poochho."
                 )
 
-            # NAYA: agar model ne sirf "main ab yeh karunga" type text likha (tool call
-            # kiye bina), aur turn-limit abhi khatam nahi hui, use "final" mat maano -
-            # ek chhota nudge bhej ke usse continue karne ko kaho.
+            # If the model only wrote "I will now do X" (no tool call) and turns remain, nudge it on.
             narration_phrases = ["i will now", "let me check", "let me now", "i'll now", "next i will", "now i will"]
             looks_like_narration = any(phrase in stripped.lower() for phrase in narration_phrases)
 
             if looks_like_narration and turn < max_turns - 1:
-                print(f"\n[INFO] Model sirf bata raha hai 'aage karunga' - tool call nahi kiya. Nudge bhej raha hoon.")
+                log.info("Model only described its plan - sending a nudge")
                 messages.append({
                     "role": "user",
                     "content": "Please continue - call the tool for the next remaining item now, don't just describe your plan."
                 })
                 continue
 
-            print("\nModel ka FINAL jawaab:")
             return final_text
 
     return "Turn limit khatam ho gayi, kaam poora nahi hua."
 
 
+# ---------------------------------------------------------------------------
+# Command-line mode (for testing without the website)
+# ---------------------------------------------------------------------------
+
 def get_current_user_id():
     """
-    ABHI: user se manually poochh rahe hain (placeholder).
-    FUTURE: jab Google OAuth login integrate hoga, yeh function
-    login se mile hue email/user-ID ko return karega -
-    baaki poora code (save/load) bina kisi change ke chalta rahega,
-    kyunki save/load hamesha se hi "user_id" ek parameter ki tarah lete hain.
+    NOW: asks for a username (placeholder).
+    LATER: with Google OAuth login this returns the logged-in user's id; everything else
+    keeps working because save/load already take user_id as a parameter.
     """
     user_id = input("Apna username/email daalo (login se pehle): ").strip()
-    if not user_id:
-        user_id = "guest"
-    return user_id
+    return user_id or "guest"
 
 
 if __name__ == "__main__":
+    logging.basicConfig(level=logging.INFO, format="%(message)s")
     print("=== AI Agent (type 'exit' to quit) ===")
 
     USER_ID = get_current_user_id()
-
-    # NAYA: har session pe automatic naya conversation-ID banega (timestamp based)
-    # Format: chat_YYYYMMDD_HHMMSS -> jaise chat_20260826_143022
     CONVERSATION_ID = "chat_" + datetime.now().strftime("%Y%m%d_%H%M%S")
 
     past_chats = list_conversations(USER_ID)
     print(f"[INFO] {USER_ID} ki {len(past_chats)} purani chat(s) mili (unhe touch nahi kiya).")
     print(f"[INFO] Yeh naya session hai: {CONVERSATION_ID}")
 
-    # NAYA: ab jab USER_ID aur CONVERSATION_ID pata chal gaye hain, search tool ko
-    # inke saath "bind" kar dete hain - taaki model sirf "query" bheje,
-    # baaki (kis user ki, kaunsi chat ko chhod ke search karna hai) yahin se pass ho jaaye.
-    def bound_search(query):
-        return search_old_conversations(USER_ID, CONVERSATION_ID, query)
-
-    tool_functions["search_old_conversations"] = bound_search
-
-    # naya session hai isliye messages hamesha fresh system-prompt se shuru honge
+    ctx = make_ctx(USER_ID, CONVERSATION_ID)
     messages = [{"role": "system", "content": SYSTEM_PROMPT}]
 
     while True:
@@ -463,7 +437,7 @@ if __name__ == "__main__":
             print("[INFO] Conversation save ho gayi. Bye!")
             break
 
-        final_answer = run_agent(messages, user_input)
+        final_answer = run_agent(messages, user_input, ctx=ctx)
         save_conversation(USER_ID, CONVERSATION_ID, messages)
 
         print("\n=== FINAL ANSWER ===")

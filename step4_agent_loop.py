@@ -9,7 +9,7 @@ from datetime import datetime
 import requests
 
 from conversation_store import save_conversation, load_conversation, list_conversations
-from tools_registry import register, get_tools, call_tool, make_ctx
+from tools_registry import register, get_tools, call_tool, make_ctx, REGISTRY
 
 log = logging.getLogger("agent")
 
@@ -291,6 +291,16 @@ SYSTEM_PROMPT = (
     "Only write your final text answer after every requested item has been fetched via a tool call."
 )
 
+# Extra guidance used ONLY while the Study tab is active. It is sent to the model with each
+# request but never saved into the conversation history.
+STUDY_HINT = (
+    "STUDY mode: the user is working with their uploaded PDFs. "
+    "Use load_pdf when they name a file, search_documents to answer questions about it, "
+    "generate_flashcards and create_quiz when asked. Answer ONLY from the excerpts a tool returns, "
+    "mention the file name, and if nothing relevant was found say so. "
+    "Flashcards and quizzes come back finished, so do not rewrite them."
+)
+
 
 def run_agent(messages, user_message, max_turns=8, module=None, ctx=None):
     """
@@ -315,15 +325,17 @@ def run_agent(messages, user_message, max_turns=8, module=None, ctx=None):
     for turn in range(max_turns):
         log.info("--- TURN %d ---", turn + 1)
 
-        # The tracked facts are added for this one API call only and are NOT saved in `messages`.
-        payload_messages = messages
+        # Extra system messages are added for this one API call only and are NOT saved in `messages`.
+        extra = []
+        if module == "study":
+            extra.append({"role": "system", "content": STUDY_HINT})
         if cities:
-            facts_message = {
+            extra.append({
                 "role": "system",
                 "content": "[Reliable fact - do not doubt this]: Cities whose weather has been checked so far in this chat: "
                            + ", ".join(sorted(cities)) + "."
-            }
-            payload_messages = messages + [facts_message]
+            })
+        payload_messages = messages + extra
 
         payload = {
             "model": MODEL,
@@ -346,6 +358,7 @@ def run_agent(messages, user_message, max_turns=8, module=None, ctx=None):
 
         if "tool_calls" in assistant_message and assistant_message["tool_calls"]:
             already_called = set()
+            direct_result = None   # set when a "direct" tool (flashcards, quiz) produced the finished answer
 
             for call in assistant_message["tool_calls"]:
                 tool_name = call["function"]["name"]
@@ -361,6 +374,13 @@ def run_agent(messages, user_message, max_turns=8, module=None, ctx=None):
                 result = call_tool(tool_name, tool_args, ctx=ctx, overrides=tool_functions)
                 log.info("Tool result: %s", result[:200])
 
+                # A "direct" tool already wrote the text for the user: return it as-is (one model call
+                # fewer, and the small model cannot shorten or garble it). Errors still go back to the model.
+                tool = REGISTRY.get(tool_name)
+                if (tool is not None and tool.direct and not result.startswith("Error")
+                        and len(assistant_message["tool_calls"]) == 1):
+                    direct_result = result
+
                 # Deterministic tracker (no LLM): remember cities whose weather really came back.
                 if tool_name == "get_weather" and result.startswith("The temperature in") and isinstance(tool_args, dict):
                     city_name = str(tool_args.get("city", "")).strip().title()
@@ -368,6 +388,10 @@ def run_agent(messages, user_message, max_turns=8, module=None, ctx=None):
                         cities.add(city_name)
 
                 messages.append({"role": "tool", "tool_name": tool_name, "content": result})
+
+            if direct_result is not None:
+                messages.append({"role": "assistant", "content": direct_result})   # keeps the saved history valid
+                return direct_result
 
             continue
 

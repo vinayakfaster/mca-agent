@@ -97,6 +97,8 @@ const ICONS: Record<string, ReactNode> = {
   lock: <><rect x="4" y="10.5" width="16" height="10" rx="2.5" /><path d="M8 10.5V8a4 4 0 0 1 8 0v2.5" /></>,
   cpu: <><rect x="6" y="6" width="12" height="12" rx="2.5" /><path d="M9 2v3M15 2v3M9 19v3M15 19v3M2 9h3M2 15h3M19 9h3M19 15h3" /></>,
   tool: <path d="M14.5 6.5a4 4 0 0 0 4.9 4.9L21 13l-8 8-3-3 8-8-1.5-1.5ZM3 21l5-5" />,
+  stop: <rect x="6.5" y="6.5" width="11" height="11" rx="2.5" fill="currentColor" />,
+  edit: <path d="M4 20h4L19 9a2.8 2.8 0 0 0-4-4L4 16v4ZM13.5 6.5l4 4" />,
 };
 function Icon({ name, className = "h-5 w-5" }: { name: string; className?: string }) {
   return (
@@ -215,14 +217,14 @@ function Body({ text }: { text: string }) {
 const Avatar = () => (
   <span aria-hidden className="mb-1 grid h-7 w-7 shrink-0 place-items-center rounded-full bg-linear-to-br from-brand to-brand2 font-display text-xs font-bold text-brandfg shadow-[0_0_18px_-4px_var(--brand)]">A</span>);
 
-function Bubble({ m }: { m: Msg }) {
+function Bubble({ m, onEdit }: { m: Msg; onEdit?: () => void }) {
   const user = m.role === "user";
   const [copied, copy] = useCopy();
   return (
     <motion.div initial={{ opacity: 0, y: 14, scale: 0.98 }} animate={{ opacity: 1, y: 0, scale: 1 }} transition={{ duration: 0.35, ease: EASE }}
       className={`group flex items-end gap-2 ${user ? "justify-end" : "justify-start"}`}>
       {!user && <Avatar />}
-      <div className="max-w-[85%] min-w-0">
+      <div className={`max-w-[85%] min-w-0 ${user ? "flex flex-col items-end" : ""}`}>
         <div className={`rounded-2xl px-4 py-2.5 leading-relaxed ${user ? "rounded-br-md bg-brand text-brandfg shadow-[0_8px_24px_-12px_var(--brand)]" : "rounded-bl-md border border-line bg-surface2"}`}>
           <Body text={m.content} />
         </div>
@@ -230,6 +232,11 @@ function Bubble({ m }: { m: Msg }) {
           <button onClick={() => copy(m.content)} aria-label="Copy reply"
             className="ml-1 mt-1 inline-flex items-center gap-1 text-xs text-muted transition hover:text-fg focus-visible:opacity-100 focus-visible:outline-2 focus-visible:outline-brand sm:opacity-0 sm:group-hover:opacity-100">
             <Icon name={copied ? "check" : "copy"} className="h-3.5 w-3.5" />{copied ? "Copied" : "Copy"}
+          </button>)}
+        {user && onEdit && (
+          <button onClick={onEdit} aria-label="Edit message"
+            className="mr-1 mt-1 inline-flex items-center gap-1 text-xs text-muted transition hover:text-fg focus-visible:opacity-100 focus-visible:outline-2 focus-visible:outline-brand sm:opacity-0 sm:group-hover:opacity-100">
+            <Icon name="edit" className="h-3.5 w-3.5" />Edit
           </button>)}
       </div>
     </motion.div>);
@@ -483,6 +490,8 @@ function Shell() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const [menu, setMenu] = useState(false);
+  const [stopped, setStopped] = useState(false);
+  const abortRef = useRef<AbortController | null>(null); // lets the Stop button cancel the pending request
   const list = useRef<HTMLDivElement>(null);
   const area = useRef<HTMLTextAreaElement>(null);
   const chatSeq = useRef(0); // BUG FIX: lets us ignore replies that arrive after the user cleared/switched chat
@@ -540,17 +549,24 @@ function Shell() {
     const text = input.trim();
     if (!text || loading) return;
     const seq = chatSeq.current;
-    setInput(""); setError(""); setLoading(true);
+    const ctrl = new AbortController();
+    abortRef.current = ctrl;
+    setInput(""); setError(""); setStopped(false); setLoading(true);
     setMsgs(m => [...m, { role: "user", content: text }]);
     try {
       const r = await api<{ reply: string; conversation_id: string }>("/api/chat", key,
-        { method: "POST", body: JSON.stringify({ user_id: USER, conversation_id: convId, message: text }) });
+        { method: "POST", signal: ctrl.signal, body: JSON.stringify({ user_id: USER, conversation_id: convId, message: text }) });
       if (seq === chatSeq.current) {
         setConvId(r.conversation_id);
         setMsgs(m => [...m, { role: "assistant", content: r.reply }]);
       }
       refresh();
     } catch (e) {
+      if ((e as Error).name === "AbortError") { // user pressed Stop
+        if (seq === chatSeq.current) setStopped(true);
+        refresh();
+        return;
+      }
       if (seq === chatSeq.current) setError(e instanceof TypeError ? "Cannot reach the backend. Is it running and is the tunnel URL current?" : (e as Error).message);
     } finally {
       if (seq === chatSeq.current) { setLoading(false); area.current?.focus(); }
@@ -560,19 +576,31 @@ function Shell() {
   const open = async (id: string) => {
     setError("");
     const seq = ++chatSeq.current;
-    setLoading(false);
+    abortRef.current?.abort();
+    setLoading(false); setStopped(false);
     try {
       const r = await api<{ messages: Msg[] }>(`/api/conversations/${id}?user_id=${USER}`, key);
       if (seq !== chatSeq.current) return;
       setMsgs(r.messages); setConvId(id); setTab("chat");
     } catch (e) { setError((e as Error).message); }
   };
-  const fresh = () => { chatSeq.current++; setLoading(false); setConvId(null); setMsgs([]); setError(""); };
+  const fresh = () => { chatSeq.current++; abortRef.current?.abort(); setLoading(false); setConvId(null); setMsgs([]); setError(""); setStopped(false); };
+  const stop = () => { abortRef.current?.abort(); };
+  /* Edit: take the last message back into the box (and drop its reply) so it can be changed and sent again. */
+  const editLast = () => {
+    const idx = msgs.map(x => x.role).lastIndexOf("user");
+    if (idx < 0 || loading) return;
+    setInput(msgs[idx].content);
+    setMsgs(msgs.slice(0, idx));
+    setError(""); setStopped(false);
+    setTimeout(() => area.current?.focus(), 0);
+  };
 
   if (!key) return <Gate dark={dark} onToggle={toggle} onSubmit={k => { store.set("apikey", k); setKey(k); }} />;
 
   const unavailable = (id: string) => mods.find(m => m.id === id);
   const title = NAV.find(n => n[0] === tab)?.[1];
+  const lastUser = msgs.map(x => x.role).lastIndexOf("user");
 
   return (
     <div className="relative flex min-h-dvh bg-bg text-fg">
@@ -621,26 +649,36 @@ function Shell() {
                   </div>
                   <div ref={list} className="flex-1 space-y-4 overflow-y-auto rounded-2xl border border-line bg-surface/70 p-4 backdrop-blur" aria-live="polite">
                     {msgs.length === 0 && !loading && <EmptyChat onPick={t => { setInput(t); area.current?.focus(); }} />}
-                    {msgs.map((m, i) => <Bubble key={i} m={m} />)}
+                    {msgs.map((m, i) => <Bubble key={i} m={m} onEdit={!loading && i === lastUser ? editLast : undefined} />)}
                     {loading && <Typing />}
                   </div>
                   <AnimatePresence>
                     {error && <motion.p role="alert" initial={{ opacity: 0, height: 0 }} animate={{ opacity: 1, height: "auto" }} exit={{ opacity: 0, height: 0 }}
                       className="mt-2 overflow-hidden rounded-lg border border-danger/30 bg-danger/10 p-2.5 text-sm text-danger">{error}</motion.p>}
                   </AnimatePresence>
+                  {stopped && !loading && <p className="mt-2 text-sm text-muted">Stopped. Edit your message or send a new one.</p>}
                   <form className="mt-3 flex items-end gap-2" onSubmit={e => { e.preventDefault(); send(); }}>
                     <div className="relative flex-1">
                       <textarea ref={area} rows={1} value={input} onChange={e => setInput(e.target.value)} placeholder="Type a message" aria-label="Message" maxLength={4000}
-                        onKeyDown={e => { if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) { e.preventDefault(); send(); } }}
+                        onKeyDown={e => {
+                          if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) { e.preventDefault(); send(); }
+                          else if (e.key === "Escape" && loading) stop();
+                        }}
                         className="block max-h-40 w-full resize-none rounded-xl border border-line bg-surface px-3.5 py-2.5 transition placeholder:text-muted focus:border-brand focus:outline-2 focus:outline-brand/40" />
                       {input.length > 3400 && <span className="absolute -top-5 right-1 font-mono text-xs text-muted">{input.length}/4000</span>}
                     </div>
-                    <motion.button whileTap={{ scale: 0.94 }} disabled={loading || !input.trim()} aria-label="Send"
-                      className="flex h-[42px] items-center gap-2 rounded-xl bg-brand px-4 font-medium text-brandfg transition disabled:opacity-40 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-brand">
-                      <span className="hidden sm:inline">Send</span><Icon name="send" className="h-[18px] w-[18px]" />
-                    </motion.button>
+                    {loading ? (
+                      <motion.button key="stop" type="button" onClick={stop} whileTap={{ scale: 0.94 }} aria-label="Stop generating"
+                        className="flex h-[42px] items-center gap-2 rounded-xl border border-danger/50 bg-danger/10 px-4 font-medium text-danger transition hover:bg-danger/20 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-danger">
+                        <span className="hidden sm:inline">Stop</span><Icon name="stop" className="h-[18px] w-[18px]" />
+                      </motion.button>
+                    ) : (
+                      <motion.button key="send" whileTap={{ scale: 0.94 }} disabled={!input.trim()} aria-label="Send"
+                        className="flex h-[42px] items-center gap-2 rounded-xl bg-brand px-4 font-medium text-brandfg transition disabled:opacity-40 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-brand">
+                        <span className="hidden sm:inline">Send</span><Icon name="send" className="h-[18px] w-[18px]" />
+                      </motion.button>)}
                   </form>
-                  <p className="mt-1.5 hidden text-xs text-muted sm:block">Enter to send · Shift+Enter for a new line</p>
+                  <p className="mt-1.5 hidden text-xs text-muted sm:block">Enter to send · Shift+Enter for a new line · Esc to stop</p>
                 </div>)}
 
               {(["study", "data", "code", "pay"] as Tab[]).includes(tab) && (

@@ -2,7 +2,7 @@
 Run from the project root:  uvicorn backend.main:app --port 8000
 step4_agent_loop.py is NOT modified."""
 
-from typing import Optional
+from typing import Literal, Optional
 import os, re, secrets, threading, logging
 from datetime import datetime
 
@@ -26,17 +26,19 @@ if "*" in ORIGINS:
 
 import step4_agent_loop as agent  # safe: CLI is under __main__ guard
 from conversation_store import save_conversation, load_conversation, list_conversations
+from tools_registry import make_ctx
+from files_api import create_router
 
-agent.url = f"{OLLAMA}/api/chat"  # env-configurable Ollama URL (model name is still hardcoded inside step4)
+agent.url = f"{OLLAMA}/api/chat"  # env-configurable Ollama URL
+agent.MODEL = MODEL               # and the model name
 
 app = FastAPI(title="MCA Agent API")
-app.add_middleware(CORSMiddleware, allow_origins=ORIGINS, allow_methods=["GET", "POST"],
+app.add_middleware(CORSMiddleware, allow_origins=ORIGINS, allow_methods=["GET", "POST", "DELETE"],
                    allow_headers=["Content-Type", "X-API-Key", "ngrok-skip-browser-warning"])
 
 UID_RE = re.compile(r"^[A-Za-z0-9_.@-]{1,64}$")      # blocks path traversal in conversation files
 CID_RE = re.compile(r"^chat_[A-Za-z0-9_]{1,40}$")
-LOCK = threading.Lock()   # step4 keeps global state (session_facts, tool_functions) -> one agent turn at a time
-CITIES: dict = {}         # (user, conv) -> set of cities, so facts never leak between sessions
+LOCK = threading.Lock()   # one agent turn at a time: keeps conversation load/save and the single local Ollama orderly
 
 
 def auth(x_api_key: str = Header(default="")):
@@ -55,6 +57,12 @@ class ChatIn(BaseModel):
     user_id: str
     conversation_id: Optional[str] = None
     message: str = Field(min_length=1, max_length=4000)
+    # Which tab the user is on. Optional: the current frontend does not send it yet.
+    module: Optional[Literal["study", "data", "code", "pay"]] = None
+
+
+# File upload / list / download / delete  ->  /api/files   (same access key as everything else)
+app.include_router(create_router(auth))
 
 
 @app.get("/api/health")
@@ -102,24 +110,22 @@ def chat(req: ChatIn):
     uid = req.user_id
     cid = req.conversation_id or "chat_" + datetime.now().strftime("%Y%m%d_%H%M%S")
     check_ids(uid, cid)
-    key = (uid, cid)
     try:
         with LOCK:
             history = load_conversation(uid, cid) if cid in list_conversations(uid) else []
             if not history:
                 history = [{"role": "system", "content": agent.SYSTEM_PROMPT}]
-            agent.session_facts["queried_cities"] = set(CITIES.get(key, set()))
-            agent.tool_functions["search_old_conversations"] = (
-                lambda query, _u=uid, _c=cid: agent.search_old_conversations(_u, _c, query))
-            reply = agent.run_agent(history, req.message)          # the real agent, unchanged
-            CITIES[key] = set(agent.session_facts["queried_cities"])
+            # ctx tells tools who is asking (for past-chat search and the user's files).
+            # The agent keeps its own per-conversation facts now, so no globals are patched here any more.
+            ctx = make_ctx(uid, cid, req.module)
+            reply = agent.run_agent(history, req.message, module=req.module, ctx=ctx)
             save_conversation(uid, cid, history)
         return {"reply": reply, "conversation_id": cid}
     except requests.exceptions.ConnectionError:
         raise HTTPException(503, "Cannot reach Ollama. Is it running (ollama serve)?")
     except requests.exceptions.Timeout:
         raise HTTPException(504, "Ollama took too long to respond.")
-    except KeyError:
+    except (KeyError, requests.exceptions.HTTPError):
         raise HTTPException(502, f"Ollama returned an error. Is the model installed? Run: ollama pull {MODEL}")
     except HTTPException:
         raise

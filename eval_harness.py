@@ -4,58 +4,49 @@ EVAL HARNESS - agent ki tool-calling accuracy ko automatically test karta hai.
 Yeh file step4_agent_loop.py ko CHHEDTI NAHI - sirf usse IMPORT karke,
 alag-alag test-prompts bhej ke check karti hai ki sahi tool call hua ya nahi.
 
-Chalane ka tareeka:
+Chalane ka tareeka (project root se):
     python eval_harness.py
 
 Isse do cheezein milengi:
 1. Terminal mein turant pass/fail dikhega, har test ke saath
-2. Ek 'eval_report.md' file banegi - yeh mentor ko dikhane layak hai 
+2. Ek 'eval_report.md' file banegi - yeh mentor ko dikhane layak hai
+
+CHANGE (Phase 0): tools ab tools_registry mein registered hain, isliye spies
+registry se bante hain. Test cases aur report ka format bilkul pehle jaisa hai.
 """
 
 import time
 from datetime import datetime
 
-from step4_agent_loop import (
-    run_agent,
-    tool_functions,
-    session_facts,
-    search_old_conversations,
-    SYSTEM_PROMPT,
-)
+from step4_agent_loop import run_agent, tool_functions, SYSTEM_PROMPT
+from tools_registry import REGISTRY
 
-# NAYA: yeh list record karti hai is TEST ke dauraan kaunse tools kitni baar
-# call hue. Real tool_functions ko "wrap" kar denge taaki asal kaam bhi ho
-# (real API call jaaye) AUR humein pata bhi chale ki call hui.
+# Is TEST ke dauraan kaunse tools kitni baar call hue.
 call_log = []
 
+# Fake user/conversation: search tool ko sirf call hona hai, uska real result matter nahi karta.
+EVAL_USER = "eval_user"
 
-def make_logging_wrapper(tool_name, original_func):
+
+def make_logging_wrapper(tool_name, original_func, ctx=None):
     """
-    Ek chhota 'spy' banata hai jo asal function ko call karta hai (jaisa
-    normal chalta), lekin call hone se pehle apna naam call_log mein
-    likh deta hai. Isse humein pata chal jaata hai model ne kya-kya use kiya.
+    Ek chhota 'spy': asal function ko call karta hai (jaisa normal chalta),
+    lekin pehle apna naam call_log mein likh deta hai.
     """
-    def wrapper(*args, **kwargs):
+    def wrapper(**kwargs):
         call_log.append(tool_name)
-        return original_func(*args, **kwargs)
+        if ctx is not None:
+            return original_func(ctx=ctx, **kwargs)
+        return original_func(**kwargs)
     return wrapper
 
 
 def install_spies():
-    # get_weather aur calculate ko wrap karo (yeh already tool_functions mein hain)
-    for name in list(tool_functions.keys()):
-        tool_functions[name] = make_logging_wrapper(name, tool_functions[name])
-
-    # search_old_conversations abhi tool_functions mein nahi hai (real script
-    # mein yeh __main__ mein bind hoti hai) - eval ke liye khud bind kar dete hain,
-    # ek fake user/conversation ke saath (kyunki humein sirf yeh dekhna hai ki
-    # model TOOL CALL karta hai ya nahi, uska real result matter nahi karta).
-    def eval_search(query):
-        return search_old_conversations("eval_user", "eval_conversation_never_matches", query)
-
-    tool_functions["search_old_conversations"] = make_logging_wrapper(
-        "search_old_conversations", eval_search
-    )
+    # Har registered tool ko wrap karo. tool_functions mein daalne se agent
+    # registry ki jagah yahi spy call karta hai.
+    ctx = {"user_id": EVAL_USER, "conversation_id": "eval_conversation_never_matches"}
+    for name, tool in REGISTRY.items():
+        tool_functions[name] = make_logging_wrapper(name, tool.func, ctx if tool.needs_ctx else None)
 
 
 # ==========================================================================
@@ -95,17 +86,18 @@ TEST_CASES = [
 ]
 
 
-def run_single_test(case):
+def run_single_test(case, index=0):
     """Ek test-case chalata hai, fresh conversation ke saath, aur result return karta hai."""
     global call_log
     call_log = []
-    session_facts["queried_cities"].clear()  # purane test ka data is test mein leak na ho
 
     messages = [{"role": "system", "content": SYSTEM_PROMPT}]
+    # Har test ki apni conversation id: agent ke facts alag-alag rehte hain, purane test ka data leak nahi hota.
+    ctx = {"user_id": EVAL_USER, "conversation_id": f"eval_{int(time.time())}_{index}"}
 
     start = time.time()
     try:
-        answer = run_agent(messages, case["prompt"])
+        answer = run_agent(messages, case["prompt"], ctx=ctx)
         error = None
     except Exception as e:
         answer = None
@@ -134,9 +126,9 @@ def main():
     print("=== EVAL HARNESS - agent ke tool-calling ko test kar raha hoon ===\n")
 
     results = []
-    for case in TEST_CASES:
+    for i, case in enumerate(TEST_CASES):
         print(f"Test: {case['name']}")
-        result = run_single_test(case)
+        result = run_single_test(case, i)
         results.append(result)
 
         status = "PASS" if result["passed"] else "FAIL"

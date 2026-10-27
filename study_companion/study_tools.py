@@ -1,371 +1,304 @@
+# study_companion/study_tools.py
 """
-Run with:  python -m unittest test_phase0 test_study -v
+Study Companion tools for the agent. Importing this module registers them (module="study"):
 
-Real: pypdf reading an actual PDF, the file store, the tool registry, the agent loop.
-Stand-ins: ChromaDB (a small in-memory fake that is deliberately STRICT, e.g. it errors if you ask for
-more results than exist) and the language model. Needs no internet, Ollama or GPU.
+    load_pdf             read a PDF the user uploaded and store it for searching
+    search_documents     find the passages that answer a question
+    list_documents       show which PDFs exist and which are loaded
+    generate_flashcards  finished flashcards            (direct: returned as-is)
+    create_quiz          finished multiple-choice quiz  (direct: returned as-is)
+
+Every tool returns plain text and works per user (ctx["user_id"]), so one user never sees
+another user's PDFs. Files are found by NAME only, never by a path.
 """
+import hashlib
+import logging
 import os
-import sys
-import tempfile
-import types
-import unittest
+import re
 from pathlib import Path
-from unittest import mock
 
-os.environ["DATA_DIR"] = tempfile.mkdtemp(prefix="agent_study_test_")
-
-# ---------------------------------------------------------------- fake chromadb
-_PERSIST = {}
-
-
-class FakeCollection:
-    def __init__(self):
-        self.rows = {}
-
-    @staticmethod
-    def _match(meta, where):
-        return all(meta.get(k) == v for k, v in (where or {}).items())
-
-    def count(self):
-        return len(self.rows)
-
-    def get(self, where=None, include=None):
-        ids = [i for i, (_, m) in self.rows.items() if self._match(m, where)]
-        return {"ids": ids, "metadatas": [self.rows[i][1] for i in ids]}
-
-    def add(self, ids, documents, metadatas):
-        assert len(ids) <= 128, "batch too big"
-        for i, d, m in zip(ids, documents, metadatas):
-            self.rows[i] = (d, m)
-
-    def delete(self, ids=None, where=None):
-        for i in [i for i, (_, m) in list(self.rows.items()) if (ids and i in ids) or (where and self._match(m, where))]:
-            del self.rows[i]
-
-    def query(self, query_texts, n_results, where=None):
-        pool = [(i, d, m) for i, (d, m) in self.rows.items() if self._match(m, where)]
-        if n_results > len(pool):
-            raise RuntimeError("Number of requested results is larger than the number of elements")
-        words = set(query_texts[0].lower().split())
-        pool.sort(key=lambda r: -len(words & set(r[1].lower().split())))
-        pool = pool[:n_results]
-        return {"documents": [[d for _, d, _ in pool]], "metadatas": [[m for _, _, m in pool]],
-                "distances": [[0.1 * k for k in range(len(pool))]]}
-
-
-class FakeClient:
-    def __init__(self, path):
-        self.cols = _PERSIST.setdefault(path, {})
-
-    def get_or_create_collection(self, name, embedding_function=None):
-        assert 3 <= len(name) <= 63 and name.replace("_", "").isalnum(), name
-        return self.cols.setdefault(name, FakeCollection())
-
-
-chroma = types.ModuleType("chromadb")
-chroma.PersistentClient = FakeClient
-chroma_utils = types.ModuleType("chromadb.utils")
-chroma_ef = types.ModuleType("chromadb.utils.embedding_functions")
-chroma_ef.SentenceTransformerEmbeddingFunction = lambda model_name: object()
-chroma_utils.embedding_functions = chroma_ef
-sys.modules.update({"chromadb": chroma, "chromadb.utils": chroma_utils,
-                    "chromadb.utils.embedding_functions": chroma_ef})
-
-try:
-    import conversation_store  # noqa: F401
-except ImportError:
-    stub = types.ModuleType("conversation_store")
-    stub.save_conversation = lambda u, c, m: None
-    stub.load_conversation = lambda u, c: []
-    stub.list_conversations = lambda u: []
-    sys.modules["conversation_store"] = stub
-
-import agent
 import file_store
-import tools_registry as tr
-from study_companion import pdf_processor, study_tools, vector_store
+from tools_registry import register
+from study_companion import llm_client, pdf_processor
 
-# ---------------------------------------------------------------- a real PDF
-TOPICS = [
-    "Photosynthesis converts light energy into chemical energy stored in glucose",
-    "Chlorophyll in the chloroplasts absorbs mostly red and blue light",
-    "The light reactions happen in the thylakoid membranes and produce ATP and NADPH",
-    "The Calvin cycle uses ATP and NADPH to fix carbon dioxide into sugar",
-    "Mitochondria perform cellular respiration and release energy from glucose",
-    "Cellular respiration has three stages glycolysis the Krebs cycle and the electron transport chain",
-]
+log = logging.getLogger("agent.study")
 
+DOCS_DIR = Path(__file__).resolve().parent / "documents"          # optional shared sample PDFs
+CHROMA_DIR = os.getenv("CHROMA_DIR", "./chroma_db")
 
-def make_pdf(pages):
-    n = len(pages)
-    font_id = 3 + 2 * n
-    kids = " ".join(f"{3 + 2 * i} 0 R" for i in range(n))
-    objs = [b"<< /Type /Catalog /Pages 2 0 R >>", f"<< /Type /Pages /Kids [{kids}] /Count {n} >>".encode()]
-    for i, lines in enumerate(pages):
-        content = "BT /F1 11 Tf 40 760 Td 14 TL " + " ".join(f"({l}) Tj T*" for l in lines) + " ET"
-        objs.append(f"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents {4 + 2 * i} 0 R "
-                    f"/Resources << /Font << /F1 {font_id} 0 R >> >> >>".encode())
-        objs.append(f"<< /Length {len(content)} >>\nstream\n{content}\nendstream".encode())
-    objs.append(b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>")
-    out, offs = b"%PDF-1.4\n", []
-    for i, o in enumerate(objs, 1):
-        offs.append(len(out))
-        out += f"{i} 0 obj\n".encode() + o + b"\nendobj\n"
-    xref = len(out)
-    out += f"xref\n0 {len(objs) + 1}\n".encode() + b"0000000000 65535 f \n"
-    out += b"".join(f"{o:010d} 00000 n \n".encode() for o in offs)
-    out += f"trailer\n<< /Size {len(objs) + 1} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF".encode()
-    return out
+DEP_MSG = ("The study tools need extra packages. On the server run: "
+           "pip install chromadb sentence-transformers pypdf")
+NO_DOC_MSG = "No document is loaded yet. Upload a PDF in the Study tab and load it first, then try again."
+
+_store = None
 
 
-BIOLOGY_PDF = make_pdf([TOPICS * 3, TOPICS * 3])      # 2 pages, ~2700 characters of text
+def get_vector_store():
+    """Create the vector store on first use (so the backend still starts if chromadb is missing)."""
+    global _store
+    if _store is None:
+        from study_companion.vector_store import VectorStore
+        _store = VectorStore(CHROMA_DIR)
+    return _store
 
 
-def fresh_store():
-    _PERSIST.clear()
-    study_tools._store = None
+# ------------------------------------------------------------------ finding files (by name only)
+
+def _norm(text):
+    return re.sub(r"\.pdf$", "", (text or "").strip().lower()).strip()
 
 
-def ctx_for(uid, module="study"):
-    return {"user_id": uid, "conversation_id": "chat_x", "module": module, "user_dir": file_store.user_dir(uid)}
+def _match_name(ref, names):
+    """Exact match first (ignoring case and a trailing .pdf), then a unique 'contains' match."""
+    r = _norm(ref)
+    if not r:
+        return None
+    for n in names:
+        if n.lower() == (ref or "").strip().lower() or _norm(n) == r:
+            return n
+    hits = [n for n in names if len(r) >= 3 and r in _norm(n)]
+    return hits[0] if len(hits) == 1 else None
 
 
-def upload(uid, name, data=BIOLOGY_PDF):
-    return file_store.save_bytes(uid, name, data)
+def _candidates(ctx):
+    """This user's uploaded PDFs, then the shared sample PDFs. Newest upload wins on equal names."""
+    uid = ctx["user_id"]
+    found = {}
+    for meta in file_store.list_files(uid):
+        if meta.get("ext") != ".pdf":
+            continue
+        try:
+            path, _ = file_store.get_file(uid, meta["id"])
+        except FileNotFoundError:
+            continue
+        found.setdefault(meta["name"].lower(), {"name": meta["name"], "path": path, "kind": "upload",
+                                                "id": meta["id"], "doc_id": meta["id"]})
+    if DOCS_DIR.is_dir():
+        who = hashlib.sha1(uid.encode()).hexdigest()[:8]      # keeps chunk ids unique per user
+        for p in sorted(DOCS_DIR.glob("*.pdf")):
+            stem = re.sub(r"[^A-Za-z0-9]+", "_", p.stem)
+            found.setdefault(p.name.lower(), {"name": p.name, "path": p, "kind": "sample",
+                                              "id": None, "doc_id": f"sample{who}_{stem}"})
+    return list(found.values())
 
 
-# ---------------------------------------------------------------- tests
-class PdfProcessing(unittest.TestCase):
-    def test_reads_a_real_pdf_and_chunks_it(self):
-        p = Path(tempfile.mkdtemp()) / "bio.pdf"
-        p.write_bytes(BIOLOGY_PDF)
-        text = pdf_processor.extract_text_from_pdf(str(p))
-        self.assertIn("Photosynthesis converts light energy", text)
-        self.assertNotIn("   ", text)
-        doc = pdf_processor.process_pdf(str(p), doc_id="abc", display_name="Biology.pdf")
-        self.assertEqual(doc["document_id"], "abc")
-        self.assertEqual(doc["filename"], "Biology.pdf")
-        self.assertGreaterEqual(doc["total_chunks"], 3)
-        self.assertEqual(doc["chunks"][0]["chunk_id"], "abc_chunk_0")
-        self.assertIsNone(pdf_processor.process_pdf("/no/such/file.pdf"))
-
-    def test_bad_pdfs_give_friendly_errors(self):
-        p = Path(tempfile.mkdtemp()) / "bad.pdf"
-        p.write_bytes(b"this is not a pdf at all")
-        with self.assertRaises(ValueError) as cm:
-            pdf_processor.extract_text_from_pdf(str(p))
-        self.assertIn("could not be opened", str(cm.exception))
-        p.write_bytes(BIOLOGY_PDF)
-        with mock.patch.object(pdf_processor, "MAX_PDF_PAGES", 1):
-            with self.assertRaises(ValueError) as cm:
-                pdf_processor.extract_text_from_pdf(str(p))
-        self.assertIn("limit", str(cm.exception))
+def _find(ctx, ref):
+    ref = (ref or "").strip()
+    cands = _candidates(ctx)
+    uploads = [c for c in cands if c["kind"] == "upload"]
+    samples = [c for c in cands if c["kind"] == "sample"]
+    for c in uploads:                                           # exact file id
+        if c["id"] == ref:
+            return c
+    name = _match_name(ref, [c["name"] for c in uploads])
+    if name is None:                                            # samples: file name only, any folder part is dropped
+        base = ref.replace("\\", "/").split("/")[-1]
+        name = _match_name(base, [c["name"] for c in samples])
+        pool = samples
+    else:
+        pool = uploads
+    return next((c for c in pool if c["name"] == name), None) if name else None
 
 
-class Store(unittest.TestCase):
-    def setUp(self):
-        fresh_store()
-        self.vs = vector_store.VectorStore("./test_chroma")
-
-    def doc(self, doc_id, n, name="a.pdf"):
-        return {"document_id": doc_id, "filename": name, "total_chunks": n,
-                "chunks": [{"chunk_id": f"{doc_id}_chunk_{i}", "document_id": doc_id, "chunk_index": i,
-                            "text": f"chunk {i} about topic {doc_id}"} for i in range(n)]}
-
-    def test_users_are_isolated(self):
-        self.vs.add_document("alice", self.doc("d1", 3))
-        self.assertEqual(len(self.vs.search("alice", "topic", 3)), 3)
-        self.assertEqual(self.vs.search("bob", "topic", 3), [])
-        self.assertEqual(self.vs.list_documents("bob"), [])
-
-    def test_reload_replaces_stale_chunks(self):
-        self.vs.add_document("u", self.doc("d1", 5))
-        self.vs.add_document("u", self.doc("d1", 2))
-        self.assertEqual(self.vs.list_documents("u")[0]["chunks"], 2)
-
-    def test_big_documents_are_batched(self):
-        self.vs.add_document("u", self.doc("big", 300))
-        self.assertEqual(self.vs.list_documents("u")[0]["chunks"], 300)
-
-    def test_n_results_larger_than_available_is_safe(self):
-        self.vs.add_document("u", self.doc("d1", 2, "a.pdf"))
-        self.vs.add_document("u", self.doc("d2", 4, "b.pdf"))
-        self.assertEqual(len(self.vs.search("u", "topic", 8)), 6)
-        self.assertEqual(len(self.vs.search("u", "topic", 8, filename="a.pdf")), 2)
-        self.assertEqual(self.vs.search("u", "topic", 8, filename="missing.pdf"), [])
-
-    def test_delete(self):
-        self.vs.add_document("u", self.doc("d1", 2))
-        self.vs.delete_document("u", "d1")
-        self.assertEqual(self.vs.list_documents("u"), [])
+def _clamp(value, default, lo, hi):
+    try:
+        return max(lo, min(hi, int(float(value))))
+    except (TypeError, ValueError):
+        return default
 
 
-class Tools(unittest.TestCase):
-    def setUp(self):
-        fresh_store()
-
-    def call(self, name, args, uid="alice"):
-        return tr.call_tool(name, args, ctx=ctx_for(uid))
-
-    def test_registered_only_for_the_study_module(self):
-        names = lambda m: [t["function"]["name"] for t in tr.get_tools(m, "hello")]
-        self.assertEqual(names(None), ["get_weather"])
-        for t in ("load_pdf", "search_documents", "generate_flashcards", "create_quiz", "list_documents"):
-            self.assertIn(t, names("study"))
-            self.assertNotIn(t, names("data"))
-        self.assertLessEqual(len(names("study")), tr.MAX_TOOLS_PER_REQUEST)
-
-    def test_load_then_search(self):
-        upload("alice", "Biology Notes.pdf")
-        self.assertIn("Loaded 'Biology Notes.pdf'", self.call("load_pdf", {"file": "biology notes"}))   # sloppy name works
-        out = self.call("search_documents", {"query": "What does chlorophyll absorb light"})
-        self.assertIn("Answer ONLY from these excerpts", out)
-        self.assertIn("Chlorophyll", out)
-        self.assertIn("Biology Notes.pdf", out)
-        self.assertNotIn("...", out)                       # no more 300-character cut-off
-
-    def test_path_tricks_and_other_users_files_are_refused(self):
-        upload("alice", "private.pdf")
-        for ref in ["../../etc/passwd", "C:\\Windows\\win.ini", "/etc/hosts", "private.pdf.exe"]:
-            self.assertIn("could not find", self.call("load_pdf", {"file": ref}, uid="alice"), ref)
-        self.assertIn("could not find", self.call("load_pdf", {"file": "private.pdf"}, uid="bob"))
-        self.assertIn("could not find", self.call("load_pdf", {"file": upload("alice", "x.pdf")["id"]}, uid="bob"))
-
-    def test_sample_folder_works_but_only_by_name(self):
-        d = Path(tempfile.mkdtemp())
-        (d / "sample.pdf").write_bytes(BIOLOGY_PDF)
-        with mock.patch.object(study_tools, "DOCS_DIR", d):
-            self.assertIn("Loaded 'sample.pdf'", self.call("load_pdf", {"file": "sample.pdf"}))
-            self.assertIn("Loaded 'sample.pdf'", self.call("load_pdf", {"file": "../../anything/sample.pdf"}))
-            self.assertIn("sample document", self.call("list_documents", {}))
-
-    def test_unreadable_and_empty_pdfs(self):
-        upload("alice", "broken.pdf", b"not a pdf")
-        self.assertIn("could not be opened", self.call("load_pdf", {"file": "broken.pdf"}))
-        upload("alice", "blank.pdf", make_pdf([[" "]]))
-        self.assertIn("no readable text", self.call("load_pdf", {"file": "blank.pdf"}))
-
-    def test_search_with_nothing_loaded_and_per_user(self):
-        self.assertIn("No document is loaded", self.call("search_documents", {"query": "anything"}))
-        upload("alice", "bio.pdf")
-        self.call("load_pdf", {"file": "bio.pdf"})
-        self.assertIn("No document is loaded", self.call("search_documents", {"query": "chlorophyll"}, uid="bob"))
-
-    def test_list_documents(self):
-        upload("alice", "a.pdf")
-        upload("alice", "b.pdf")
-        self.call("load_pdf", {"file": "a.pdf"})
-        out = self.call("list_documents", {})
-        self.assertRegex(out, r"- a\.pdf \(loaded, \d+ chunks\)")
-        self.assertIn("- b.pdf (uploaded, not loaded yet)", out)
-
-    def test_missing_dependencies_give_a_clear_message(self):
-        upload("alice", "bio.pdf")
-        with mock.patch.object(study_tools, "get_vector_store", side_effect=ImportError("no chromadb")):
-            self.assertIn("pip install chromadb", self.call("load_pdf", {"file": "bio.pdf"}))
-            self.assertIn("pip install chromadb", self.call("search_documents", {"query": "x"}))
-
-    def test_flashcards(self):
-        upload("alice", "bio.pdf")
-        self.call("load_pdf", {"file": "bio.pdf"})
-        reply = {"cards": [{"question": "What absorbs light?", "answer": "Chlorophyll"},
-                           {"question": "", "answer": "dropped"}, {"question": "Where is the Calvin cycle?", "answer": "Stroma"}]}
-        with mock.patch.object(study_tools.llm_client, "chat_once", return_value=reply) as m:
-            out = self.call("generate_flashcards", {"topic": "photosynthesis", "num_cards": "3"})
-        self.assertIn("1. Q: What absorbs light?", out)
-        self.assertIn("A: Chlorophyll", out)
-        self.assertNotIn("dropped", out)
-        self.assertIn("Using ONLY the excerpts", m.call_args[0][0])
-        self.assertIn("Photosynthesis", m.call_args[0][0])      # real retrieved text went into the prompt
-
-    def test_quiz_validation(self):
-        upload("alice", "bio.pdf")
-        self.call("load_pdf", {"file": "bio.pdf"})
-        reply = {"questions": [
-            {"question": "Which pigment absorbs light?", "options": ["Chlorophyll", "Keratin", "Insulin", "Lipase"], "correct": "a", "explanation": "It is the green pigment."},
-            {"question": "Broken: only 3 options", "options": ["a", "b", "c"], "correct": "A", "explanation": ""},
-            {"question": "Broken: bad letter", "options": ["a", "b", "c", "d"], "correct": "Z", "explanation": ""}]}
-        with mock.patch.object(study_tools.llm_client, "chat_once", return_value=reply):
-            out = self.call("create_quiz", {"topic": "pigments", "difficulty": "nonsense"})
-        self.assertIn("Quiz: pigments (medium, 1 questions)", out)
-        self.assertIn("A) Chlorophyll", out)
-        self.assertIn("1. A - It is the green pigment.", out)
-        self.assertNotIn("Broken", out)
-        with mock.patch.object(study_tools.llm_client, "chat_once", return_value={"questions": []}):
-            self.assertIn("could not make a quiz", self.call("create_quiz", {"topic": "pigments"}))
-
-    def test_llm_failure_becomes_an_error_string(self):
-        import requests
-        upload("alice", "bio.pdf")
-        self.call("load_pdf", {"file": "bio.pdf"})
-        with mock.patch.object(study_tools.llm_client, "chat_once", side_effect=requests.ConnectionError("down")):
-            self.assertTrue(self.call("generate_flashcards", {"topic": "photosynthesis"}).startswith("Error running"))
+def _excerpts(results):
+    parts = []
+    for i, r in enumerate(results, 1):
+        m = r.get("metadata") or {}
+        part = int(m.get("chunk_index", 0)) + 1
+        parts.append(f"[{i}] {m.get('filename', 'document')} (part {part})\n{r['text'].strip()}")
+    return "\n\n".join(parts)
 
 
-class FakeResp:
-    def __init__(self, d): self.d = d
-    def raise_for_status(self): pass
-    def json(self): return self.d
+# ------------------------------------------------------------------ tools
+
+@register(
+    name="load_pdf",
+    description=("Read a PDF the user uploaded and store it so it can be searched. Use this first when the "
+                 "user names a PDF. Pass the file name, e.g. 'Biology Notes.pdf'."),
+    properties={"file": {"type": "string", "description": "File name of the uploaded PDF"}},
+    required=["file"], module="study", needs_ctx=True,
+)
+def load_pdf(file, ctx):
+    try:
+        store = get_vector_store()
+    except ImportError:
+        return DEP_MSG
+    c = _find(ctx, file)
+    if not c:
+        names = [x["name"] for x in _candidates(ctx)]
+        hint = (" Available PDFs: " + ", ".join(names) + ".") if names else \
+               " No PDFs are uploaded yet. Upload one in the Study tab first."
+        return f"I could not find a PDF called '{file}'." + hint
+    try:
+        doc = pdf_processor.process_pdf(str(c["path"]), doc_id=c["doc_id"], display_name=c["name"])
+    except ValueError as e:
+        return str(e).replace(Path(c["path"]).name, c["name"])
+    if not doc or not doc["chunks"]:
+        return f"'{c['name']}' has no readable text. It may be a scanned image, which this tool cannot read."
+    store.add_document(ctx["user_id"], doc)
+    return (f"Loaded '{c['name']}' ({doc['total_chunks']} chunks). "
+            "You can now ask questions about it, or ask for flashcards or a quiz.")
 
 
-class AgentWithStudy(unittest.TestCase):
-    def setUp(self):
-        fresh_store()
-
-    def run_agent(self, replies, text, module="study", uid="alice"):
-        sent, it = [], iter(replies)
-
-        def post(u, json=None, timeout=None):
-            sent.append(json)
-            return FakeResp({"message": next(it)})
-        msgs = [{"role": "system", "content": agent.SYSTEM_PROMPT}]
-        with mock.patch("agent.requests.post", post):
-            out = agent.run_agent(msgs, text, module=module, ctx=ctx_for(uid, module))
-        return out, msgs, sent
-
-    @staticmethod
-    def call(name, args):
-        return {"role": "assistant", "content": "", "tool_calls": [{"function": {"name": name, "arguments": args}}]}
-
-    def test_search_flow_uses_the_study_hint_and_tools(self):
-        upload("alice", "bio.pdf")
-        study_tools.load_pdf("bio.pdf", ctx_for("alice"))
-        out, msgs, sent = self.run_agent(
-            [self.call("search_documents", {"query": "chlorophyll light"}), {"role": "assistant", "content": "It absorbs red and blue light (bio.pdf)."}],
-            "what absorbs light in bio.pdf?")
-        self.assertIn("red and blue", out)
-        tool_msg = [m for m in msgs if m["role"] == "tool"][0]
-        self.assertEqual(tool_msg["tool_name"], "search_documents")
-        self.assertIn("Chlorophyll", tool_msg["content"])
-        self.assertIn("search_documents", [t["function"]["name"] for t in sent[0]["tools"]])
-        self.assertTrue(any("STUDY mode" in str(m.get("content")) for m in sent[0]["messages"]))
-        self.assertFalse(any("STUDY mode" in str(m.get("content")) for m in msgs))     # hint is never saved
-
-    def test_study_tools_hidden_without_the_study_module(self):
-        _, _, sent = self.run_agent([{"role": "assistant", "content": "hi"}], "what absorbs light", module=None)
-        self.assertEqual([t["function"]["name"] for t in sent[0]["tools"]], ["get_weather"])
-        self.assertFalse(any("STUDY mode" in str(m.get("content")) for m in sent[0]["messages"]))
-
-    def test_flashcards_are_returned_as_is_without_a_second_model_call(self):
-        upload("alice", "bio.pdf")
-        study_tools.load_pdf("bio.pdf", ctx_for("alice"))
-        cards = {"cards": [{"question": "Q one?", "answer": "A one"}]}
-        with mock.patch.object(study_tools.llm_client, "chat_once", return_value=cards):
-            out, msgs, sent = self.run_agent([self.call("generate_flashcards", {"topic": "photosynthesis"})],
-                                             "make flashcards on photosynthesis")
-        self.assertEqual(len(sent), 1)                       # only ONE call to the chat model
-        self.assertIn("1. Q: Q one?", out)
-        self.assertEqual(msgs[-1], {"role": "assistant", "content": out})   # history stays valid
-
-    def test_direct_tool_errors_go_back_to_the_model_instead(self):
-        out, msgs, sent = self.run_agent(
-            [self.call("generate_flashcards", {"topic": "x"}), {"role": "assistant", "content": "Please upload a PDF first."}],
-            "make flashcards")
-        # nothing is loaded -> the friendly 'no document' text is returned directly (it is not an 'Error ...')
-        self.assertIn("No document is loaded", out)
-        self.assertEqual(len(sent), 1)
+@register(
+    name="search_documents",
+    description=("Find the passages of the user's loaded PDFs that answer a question. Use this for every "
+                 "question about a PDF's content."),
+    properties={"query": {"type": "string", "description": "What to look for, in a few words"},
+                "file": {"type": "string", "description": "Optional: only search this PDF (file name)"}},
+    required=["query"], module="study", needs_ctx=True,
+)
+def search_documents(query, ctx, file=None):
+    try:
+        store = get_vector_store()
+    except ImportError:
+        return DEP_MSG
+    uid = ctx["user_id"]
+    filename = None
+    if file:
+        filename = _match_name(file, [d["filename"] for d in store.list_documents(uid)])
+        if filename is None:
+            return f"'{file}' is not loaded yet. Load it first with load_pdf."
+    results = store.search(uid, query, 5, filename=filename)
+    if not results:
+        return NO_DOC_MSG if not store.list_documents(uid) else "I found no relevant text in the loaded documents."
+    return ("Answer ONLY from these excerpts and name the file in your answer. "
+            "If they do not contain the answer, say so.\n\n" + _excerpts(results))
 
 
-if __name__ == "__main__":
-    unittest.main()
+@register(
+    name="list_documents",
+    description="List the user's PDFs and whether each one is loaded for searching.",
+    properties={}, required=[], module="study", needs_ctx=True,
+)
+def list_documents(ctx):
+    loaded = {}
+    try:
+        for d in get_vector_store().list_documents(ctx["user_id"]):
+            loaded[d["filename"]] = d["chunks"]
+    except ImportError:
+        pass
+    lines, seen = [], set()
+    for c in _candidates(ctx):
+        seen.add(c["name"])
+        label = "sample document, " if c["kind"] == "sample" else ""
+        if c["name"] in loaded:
+            lines.append(f"- {c['name']} ({label}loaded, {loaded[c['name']]} chunks)")
+        elif c["kind"] == "sample":
+            lines.append(f"- {c['name']} (sample document, not loaded yet)")
+        else:
+            lines.append(f"- {c['name']} (uploaded, not loaded yet)")
+    for name, n in loaded.items():                              # loaded earlier, upload since deleted
+        if name not in seen:
+            lines.append(f"- {name} (loaded, {n} chunks)")
+    return "Your PDFs:\n" + "\n".join(lines) if lines else "No PDFs yet. Upload one in the Study tab."
+
+
+FLASHCARD_SCHEMA = {
+    "type": "object",
+    "properties": {"cards": {"type": "array", "items": {
+        "type": "object",
+        "properties": {"question": {"type": "string"}, "answer": {"type": "string"}},
+        "required": ["question", "answer"]}}},
+    "required": ["cards"],
+}
+
+QUIZ_SCHEMA = {
+    "type": "object",
+    "properties": {"questions": {"type": "array", "items": {
+        "type": "object",
+        "properties": {"question": {"type": "string"},
+                       "options": {"type": "array", "items": {"type": "string"}},
+                       "correct": {"type": "string"},
+                       "explanation": {"type": "string"}},
+        "required": ["question", "options", "correct", "explanation"]}}},
+    "required": ["questions"],
+}
+
+
+@register(
+    name="generate_flashcards",
+    description="Make study flashcards (question and answer) about a topic from the user's loaded PDFs.",
+    properties={"topic": {"type": "string", "description": "Topic to make flashcards about"},
+                "num_cards": {"type": "integer", "description": "How many cards (default 8, max 15)"}},
+    required=["topic"], module="study", needs_ctx=True, direct=True,
+)
+def generate_flashcards(topic, ctx, num_cards=8):
+    n = _clamp(num_cards, 8, 1, 15)
+    try:
+        results = get_vector_store().search(ctx["user_id"], topic, 8)
+    except ImportError:
+        return DEP_MSG
+    if not results:
+        return NO_DOC_MSG
+    prompt = (f"Using ONLY the excerpts below, write {n} flashcards about \"{topic}\". "
+              "Each card has a short question and a short answer. Do not add facts that are not in the excerpts. "
+              "Reply with JSON only.\n\nExcerpts:\n" + _excerpts(results))
+    data = llm_client.chat_once(prompt, FLASHCARD_SCHEMA)
+    raw = data.get("cards") if isinstance(data, dict) else None
+    cards = [(str(c.get("question", "")).strip(), str(c.get("answer", "")).strip())
+             for c in (raw or []) if isinstance(c, dict)]
+    cards = [(q, a) for q, a in cards if q and a][:n]
+    if not cards:
+        return "I could not make flashcards from the document for that topic. Try a different topic."
+    body = "\n".join(f"{i}. Q: {q}\n   A: {a}" for i, (q, a) in enumerate(cards, 1))
+    return f"Flashcards: {topic} ({len(cards)} cards)\n\n{body}"
+
+
+@register(
+    name="create_quiz",
+    description="Make a multiple-choice quiz about a topic from the user's loaded PDFs.",
+    properties={"topic": {"type": "string", "description": "Topic of the quiz"},
+                "num_questions": {"type": "integer", "description": "How many questions (default 5, max 10)"},
+                "difficulty": {"type": "string", "description": "easy, medium or hard"}},
+    required=["topic"], module="study", needs_ctx=True, direct=True,
+)
+def create_quiz(topic, ctx, num_questions=5, difficulty="medium"):
+    n = _clamp(num_questions, 5, 1, 10)
+    difficulty = str(difficulty or "").strip().lower()
+    if difficulty not in ("easy", "medium", "hard"):
+        difficulty = "medium"
+    try:
+        results = get_vector_store().search(ctx["user_id"], topic, 8)
+    except ImportError:
+        return DEP_MSG
+    if not results:
+        return NO_DOC_MSG
+    prompt = (f"Using ONLY the excerpts below, write {n} {difficulty} multiple-choice questions about \"{topic}\". "
+              "Each question has exactly 4 options, the letter of the correct option (A, B, C or D) in "
+              "\"correct\", and a one-sentence explanation. Do not add facts that are not in the excerpts. "
+              "Reply with JSON only.\n\nExcerpts:\n" + _excerpts(results))
+    data = llm_client.chat_once(prompt, QUIZ_SCHEMA)
+    raw = data.get("questions") if isinstance(data, dict) else None
+    good = []
+    for q in (raw or []):
+        if not isinstance(q, dict):
+            continue
+        question = str(q.get("question", "")).strip()
+        options = q.get("options")
+        letter = str(q.get("correct", "")).strip().upper()[:1]
+        if not question or not isinstance(options, list) or len(options) != 4 or letter not in "ABCD" or not letter:
+            continue
+        options = [re.sub(r"^[A-Da-d][\).:]\s+", "", str(o).strip()) for o in options]
+        if not all(options):
+            continue
+        good.append((question, options, letter, str(q.get("explanation", "")).strip()))
+    good = good[:n]
+    if not good:
+        return "I could not make a quiz from the document for that topic. Try a different topic."
+    out = [f"Quiz: {topic} ({difficulty}, {len(good)} questions)", ""]
+    for i, (question, options, _, _) in enumerate(good, 1):
+        out.append(f"{i}. {question}")
+        out += [f"{'ABCD'[k]}) {o}" for k, o in enumerate(options)]
+        out.append("")
+    out.append("Answer key:")
+    for i, (_, _, letter, expl) in enumerate(good, 1):
+        out.append(f"{i}. {letter} - {expl}" if expl else f"{i}. {letter}")
+    return "\n".join(out)

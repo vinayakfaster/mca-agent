@@ -336,13 +336,11 @@ def run_agent(messages, user_message, max_turns=8, module=None, ctx=None):
                 "repeat_penalty": 1.2
             }
         }
-        try:
-            response = requests.post(url, json=payload, timeout=OLLAMA_TIMEOUT)
-            response.raise_for_status()
-            assistant_message = response.json()["message"]
-        except requests.RequestException:
-            log.exception("Ollama request failed")
-            return "I could not reach the language model (Ollama). Please check that it is running and try again."
+        # Ollama errors (down, too slow, model missing) are NOT caught here on purpose:
+        # backend/main.py turns them into clear 503 / 504 / 502 messages.
+        response = requests.post(url, json=payload, timeout=OLLAMA_TIMEOUT)
+        response.raise_for_status()
+        assistant_message = response.json()["message"]
 
         messages.append(assistant_message)
 

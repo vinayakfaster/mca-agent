@@ -31,6 +31,7 @@ class Tool:
     module: str = "general"
     needs_ctx: bool = False                       # True -> func receives ctx=... as a keyword
     when: Optional[Callable[[str], bool]] = None  # keyword gate on the user's message; None = always
+    direct: bool = False                          # True -> the tool's result IS the final answer (no 2nd model pass)
 
     def schema(self) -> dict:
         return {"type": "function", "function": {
@@ -46,15 +47,20 @@ REGISTRY: dict = {}
 
 def register(name: str, description: str, properties: dict, required=(),
              module: str = "general", needs_ctx: bool = False,
-             when: Optional[Callable[[str], bool]] = None):
-    """Decorator: register a function as an agent tool."""
+             when: Optional[Callable[[str], bool]] = None, direct: bool = False):
+    """
+    Decorator: register a function as an agent tool.
+    direct=True is for tools that already produce the finished text for the user (flashcards,
+    a quiz, a README): the agent returns it as-is. That is faster (no second pass through the
+    slow local model) and the small model cannot shorten or garble it.
+    """
     if module not in MODULES:
         raise ValueError(f"Unknown module '{module}'. Use one of {MODULES}.")
 
     def deco(fn):
         if name in REGISTRY:
             log.warning("Tool '%s' registered twice - replacing the old one", name)
-        REGISTRY[name] = Tool(name, description, properties, list(required), fn, module, needs_ctx, when)
+        REGISTRY[name] = Tool(name, description, properties, list(required), fn, module, needs_ctx, when, direct)
         return fn
     return deco
 

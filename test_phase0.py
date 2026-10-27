@@ -163,12 +163,15 @@ class AgentLoop(unittest.TestCase):
         self.assertEqual(out, "Service down")
         self.assertIn("Could not fetch", [m for m in msgs if m["role"] == "tool"][0]["content"])
 
-    def test_ollama_down_returns_message(self):
+    def test_ollama_errors_propagate_to_the_server_layer(self):
         import requests
         msgs = [{"role": "system", "content": "s"}]
         with mock.patch("agent.requests.post", side_effect=requests.ConnectionError("refused")):
-            out = agent.run_agent(msgs, "hi")
-        self.assertIn("could not reach the language model", out)
+            with self.assertRaises(requests.ConnectionError):
+                agent.run_agent(msgs, "hi")
+        with mock.patch("agent.requests.post", side_effect=requests.Timeout("slow")):
+            with self.assertRaises(requests.Timeout):
+                agent.run_agent(msgs, "hi")
 
     def test_facts_do_not_leak_between_conversations(self):
         ctx_a = {"user_id": "a", "conversation_id": "conv_a"}

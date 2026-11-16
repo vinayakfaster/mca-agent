@@ -1,0 +1,58 @@
+[
+  {
+    "role": "system",
+    "content": "You are a careful agent that uses tools step by step. Rules: 1. Call only ONE tool at a time, one step at a time. 2. Never nest a tool call inside another tool's arguments (e.g. never write get_weather(...) inside calculate). 3. If a task needs data from multiple tools, first call the tools separately to get plain numbers, then in a LATER step call calculate using only those plain numbers you already received. 4. Never invent, guess, or assume any number that wasn't explicitly given to you in a tool result. 5. If the user asks about something from a PAST/OLDER SESSION (a different, previous chat, not this one), use the search_old_conversations tool. 6. Any message labeled '[Earlier conversation summary]' is part of THIS SAME CURRENT conversation - it has just been condensed to save space. Read it directly to answer questions about what was discussed earlier in THIS chat. Do NOT call search_old_conversations for information that is already visible to you in this summary or in the messages above."
+  },
+  {
+    "role": "system",
+    "content": "[Condensed history of THIS SAME current chat, for context]: The current temperature in Delhi is 30.6 degrees Celsius with 76% humidity. The temperature in Mumbai was not provided in the conversation."
+  },
+  {
+    "role": "assistant",
+    "content": "",
+    "tool_calls": [
+      {
+        "id": "call_vufm0i0g",
+        "function": {
+          "index": 0,
+          "name": "get_weather",
+          "arguments": {
+            "city": "Mumbai"
+          }
+        }
+      }
+    ]
+  },
+  {
+    "role": "tool",
+    "content": "The temperature in Mumbai is exactly 29.1 degrees Celsius, humidity 76%."
+  },
+  {
+    "role": "assistant",
+    "content": "Here's the current weather information:\n\n- **Delhi**: The temperature is 30.6°C with a humidity level of 76%.  \n- **Mumbai**: The temperature is 29.1°C with a humidity level of 76%."
+  },
+  {
+    "role": "user",
+    "content": "write a java program to hello world"
+  },
+  {
+    "role": "assistant",
+    "content": "Here's a simple Java program that prints \"Hello, World!\" to the console:\n\n```java\npublic class HelloWorld {\n    public static void main(String[] args) {\n        System.out.println(\"Hello, World!\");\n    }\n}\n```\n\n### Explanation:\n- `public class HelloWorld`: This defines a class named `HelloWorld`.\n- `public static void main(String[] args)`: This is the entry point of any Java application.\n- `System.out.println(\"Hello, World!\");`: This line prints \"Hello, World!\" to the console."
+  },
+  {
+    "role": "user",
+    "content": "maine ab tak kin cities ka weather poocha?"
+  },
+  {
+    "role": "assistant",
+    "content": "You have asked for the weather information of **Delhi** and **Mumbai** so far."
+  },
+  {
+    "role": "user",
+    "content": "maine ab tak kin cities,countries ka weather poocha?"
+  },
+  {
+    "role": "assistant",
+    "content": "You have asked for the weather information of **Delhi** (a city in India) and **Mumbai** (also a city in India) so far. No country's weather has been requested yet."
+  }
+]

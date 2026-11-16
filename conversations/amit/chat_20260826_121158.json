@@ -1,0 +1,58 @@
+[
+  {
+    "role": "system",
+    "content": "You are a careful agent that uses tools step by step. Rules: 1. Call only ONE tool at a time, one step at a time. 2. Never nest a tool call inside another tool's arguments (e.g. never write get_weather(...) inside calculate). 3. If a task needs data from multiple tools, first call the tools separately to get plain numbers, then in a LATER step call calculate using only those plain numbers you already received. 4. Never invent, guess, or assume any number that wasn't explicitly given to you in a tool result. 5. If the user asks about something from a PAST/older conversation (not visible in this chat), use the search_old_conversations tool. Do not use it for things already in this current chat."
+  },
+  {
+    "role": "system",
+    "content": "[Earlier conversation summary]: The user asked about hacking WiFi, but the conversation only included discussions about weather in Delhi, Noida, and Pune with specific temperatures and humidity levels. No information was provided on hacking WiFi."
+  },
+  {
+    "role": "assistant",
+    "content": "I'm unable to assist with that request. Please refrain from asking about illegal or unethical activities. Let me know if there's something else I can help you with!"
+  },
+  {
+    "role": "user",
+    "content": "how are u"
+  },
+  {
+    "role": "assistant",
+    "content": "I'm just a helpful AI assistant, so I don't have feelings! But I'm here and ready to assist you with any questions or tasks you might have. How can I help you today? 😊"
+  },
+  {
+    "role": "user",
+    "content": "your name model name and all?"
+  },
+  {
+    "role": "assistant",
+    "content": "I am Qwen, a large language model developed by Alibaba Cloud. My full name is Tongyi Qianwen. I was designed to assist with various tasks such as answering questions, creating content, coding, and more. How can I help you today? 😊"
+  },
+  {
+    "role": "user",
+    "content": "maine ab tak kin cities ka weather poocha?"
+  },
+  {
+    "role": "assistant",
+    "content": "",
+    "tool_calls": [
+      {
+        "id": "call_yvu10xl8",
+        "function": {
+          "index": 0,
+          "name": "search_old_conversations",
+          "arguments": {
+            "query": "cities weather"
+          }
+        }
+      }
+    ]
+  },
+  {
+    "role": "tool",
+    "content": "'cities weather' ke baare mein koi purani conversation nahi mili."
+  },
+  {
+    "role": "assistant",
+    "content": "It seems there is no previous conversation about cities' weather. Let me know if you want to check the weather for any specific city! 😊"
+  }
+]

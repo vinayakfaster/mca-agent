@@ -1,2 +1,92 @@
 @import "tailwindcss";
-@theme { --font-sans: "Segoe UI", system-ui, sans-serif; }
+
+@theme {
+  --font-sans: "Segoe UI", system-ui, sans-serif;
+
+  /* Brand & UI Colors */
+  --color-brand: #14b8a6;
+  --color-brand2: #8b5cf6;
+  --color-brandfg: #ffffff;
+  --color-danger: #ef4444;
+  --color-warn: #f59e0b;
+
+  /* Light Mode Defaults */
+  --color-bg: #f3f5fa;
+  --color-surface: #ffffff;
+  --color-surface2: #f8fafc;
+  --color-line: #e2e8f0;
+  --color-fg: #0f172a;
+  --color-muted: #64748b;
+}
+
+/* Dark Mode Overrides */
+@layer base {
+  .dark {
+    --color-bg: #07080d;
+    --color-surface: #0f1117;
+    --color-surface2: #161a23;
+    --color-line: #1e2430;
+    --color-fg: #f1f5f9;
+    --color-muted: #94a3b8;
+    --color-brand: #2dd4bf;
+    --color-brand2: #a78bfa;
+    --color-brandfg: #07080d;
+    --color-danger: #f87171;
+    --color-warn: #fbbf24;
+  }
+}
+
+/* Custom Animations & Utilities */
+@layer utilities {
+  .text-gradient {
+    background: linear-gradient(to right, var(--color-brand), var(--color-brand2));
+    -webkit-background-clip: text;
+    background-clip: text;
+    color: transparent;
+  }
+  .glass {
+    background: rgba(255, 255, 255, 0.05);
+    backdrop-filter: blur(16px);
+    -webkit-backdrop-filter: blur(16px);
+  }
+  .grid-bg {
+    background-image: linear-gradient(to right, var(--color-line) 1px, transparent 1px),
+      linear-gradient(to bottom, var(--color-line) 1px, transparent 1px);
+    background-size: 40px 40px;
+    mask-image: radial-gradient(ellipse at center, black 40%, transparent 70%);
+  }
+  .spot {
+    position: relative;
+    overflow: hidden;
+  }
+  .spot::before {
+    content: "";
+    position: absolute;
+    inset: 0;
+    background: radial-gradient(400px circle at var(--mx, 50%) var(--my, 50%), rgba(255, 255, 255, 0.06), transparent 40%);
+    pointer-events: none;
+    z-index: 1;
+  }
+  .drift {
+    animation: drift 18s ease-in-out infinite alternate;
+  }
+  .typing-dot {
+    animation: typing 1.2s ease-in-out infinite;
+  }
+  .wheel {
+    animation: wheel 2s ease-in-out infinite;
+  }
+}
+
+@keyframes drift {
+  0% { transform: translate(0, 0) scale(1); }
+  100% { transform: translate(40px, -30px) scale(1.1); }
+}
+@keyframes typing {
+  0%, 100% { opacity: 0.2; transform: translateY(0); }
+  50% { opacity: 1; transform: translateY(-3px); }
+}
+@keyframes wheel {
+  0% { transform: translateY(0); opacity: 1; }
+  100% { transform: translateY(12px); opacity: 0; }
+}

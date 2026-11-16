@@ -3,14 +3,22 @@ Run from the project root:  uvicorn backend.main:app --port 8000
 step4_agent_loop.py is NOT modified."""
 
 from typing import Optional
-import os, re, secrets, threading, logging
+import os, re, secrets, threading, logging, shutil, tempfile
 from datetime import datetime
 
 import requests
 from dotenv import load_dotenv
-from fastapi import Depends, FastAPI, Header, HTTPException, Query
+from fastapi import Depends, FastAPI, Header, HTTPException, Query, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
+from fastapi.staticfiles import StaticFiles
+
+# Study Companion Imports
+from study_companion.study_tools import load_pdf, search_documents, generate_flashcards, create_quiz
+# Data Analysis Imports
+from study_companion.data_tools import load_data, clean_data, run_sql_query, generate_charts, statistical_analysis
+# Code Documentation Imports
+from study_companion.code_tools import scan_codebase, analyze_functions, generate_readme, write_docstrings
 
 load_dotenv()
 log = logging.getLogger("backend")
@@ -24,19 +32,23 @@ if not API_KEY:
 if "*" in ORIGINS:
     raise RuntimeError("ALLOWED_ORIGINS must not contain '*'.")
 
-import step4_agent_loop as agent  # safe: CLI is under __main__ guard
+import step4_agent_loop as agent
 from conversation_store import save_conversation, load_conversation, list_conversations
 
-agent.url = f"{OLLAMA}/api/chat"  # env-configurable Ollama URL (model name is still hardcoded inside step4)
+agent.url = f"{OLLAMA}/api/chat"
 
 app = FastAPI(title="MCA Agent API")
 app.add_middleware(CORSMiddleware, allow_origins=ORIGINS, allow_methods=["GET", "POST"],
                    allow_headers=["Content-Type", "X-API-Key", "ngrok-skip-browser-warning"])
 
-UID_RE = re.compile(r"^[A-Za-z0-9_.@-]{1,64}$")      # blocks path traversal in conversation files
+# Mount charts directory for Data Analysis
+os.makedirs("generated_charts", exist_ok=True)
+app.mount("/charts", StaticFiles(directory="generated_charts"), name="charts")
+
+UID_RE = re.compile(r"^[A-Za-z0-9_.@-]{1,64}$")
 CID_RE = re.compile(r"^chat_[A-Za-z0-9_]{1,40}$")
-LOCK = threading.Lock()   # step4 keeps global state (session_facts, tool_functions) -> one agent turn at a time
-CITIES: dict = {}         # (user, conv) -> set of cities, so facts never leak between sessions
+LOCK = threading.Lock()
+CITIES: dict = {}
 
 
 def auth(x_api_key: str = Header(default="")):
@@ -56,6 +68,9 @@ class ChatIn(BaseModel):
     conversation_id: Optional[str] = None
     message: str = Field(min_length=1, max_length=4000)
 
+class PathRequest(BaseModel):
+    path: str
+
 
 @app.get("/api/health")
 def health():
@@ -74,9 +89,9 @@ def modules():
         {"id": "chat", "name": "AI Chat (run_agent)", "available": True,
          "note": "Tools: get_weather, calculate, search_old_conversations."},
         {"id": "history", "name": "Conversation history", "available": True, "note": "Uses conversation_store."},
-        {"id": "study", "name": "Study Companion", "available": False, "note": "Not wired yet: no study tool is registered in step4_agent_loop.py."},
-        {"id": "data", "name": "Data Analysis", "available": False, "note": "Not implemented in the agent yet."},
-        {"id": "code", "name": "Code Documentation", "available": False, "note": "Not implemented in the agent yet."},
+        {"id": "study", "name": "Study Companion", "available": True, "note": "Upload PDF, Search, Generate Flashcards & Quizzes."},
+        {"id": "data", "name": "Data Analysis", "available": True, "note": "Upload CSV/Excel, Clean, SQL Queries, Charts & Stats."},
+        {"id": "code", "name": "Code Documentation", "available": True, "note": "Scan codebase, analyze functions, generate README, write docstrings."},
         {"id": "pay", "name": "x402 Payments", "available": False, "note": "Not implemented. No payments are made."},
     ]
 
@@ -111,7 +126,7 @@ def chat(req: ChatIn):
             agent.session_facts["queried_cities"] = set(CITIES.get(key, set()))
             agent.tool_functions["search_old_conversations"] = (
                 lambda query, _u=uid, _c=cid: agent.search_old_conversations(_u, _c, query))
-            reply = agent.run_agent(history, req.message)          # the real agent, unchanged
+            reply = agent.run_agent(history, req.message)
             CITIES[key] = set(agent.session_facts["queried_cities"])
             save_conversation(uid, cid, history)
         return {"reply": reply, "conversation_id": cid}
@@ -126,3 +141,126 @@ def chat(req: ChatIn):
     except Exception:
         log.exception("chat failed")
         raise HTTPException(500, "Something went wrong while running the agent.")
+
+
+# ==========================================
+# STUDY COMPANION ENDPOINTS
+# ==========================================
+
+@app.post("/api/study/upload", dependencies=[Depends(auth)])
+async def upload_pdf(file: UploadFile = File(...)):
+    temp_dir = "temp_uploads"
+    os.makedirs(temp_dir, exist_ok=True)
+    file_path = os.path.join(temp_dir, file.filename)
+    
+    with open(file_path, "wb") as buffer:
+        shutil.copyfileobj(file.file, buffer)
+    
+    result = load_pdf(file_path)
+    
+    if os.path.exists(file_path):
+        os.remove(file_path)
+        
+    return {"message": result}
+
+
+@app.post("/api/study/search", dependencies=[Depends(auth)])
+async def search_pdf(query: str = Form(...), n_results: int = Form(5)):
+    result = search_documents(query, n_results)
+    return {"result": result}
+
+
+@app.post("/api/study/flashcards", dependencies=[Depends(auth)])
+async def make_flashcards(topic: str = Form(...), num_cards: int = Form(5)):
+    result = generate_flashcards(topic, num_cards)
+    return {"result": result}
+
+
+@app.post("/api/study/quiz", dependencies=[Depends(auth)])
+async def make_quiz(topic: str = Form(...), num_questions: int = Form(5), difficulty: str = Form("medium")):
+    result = create_quiz(topic, num_questions, difficulty)
+    return {"result": result}
+
+
+# ==========================================
+# DATA ANALYSIS ENDPOINTS
+# ==========================================
+
+@app.post("/api/data/upload", dependencies=[Depends(auth)])
+async def data_upload(file: UploadFile = File(...)):
+    temp_dir = "temp_data_uploads"
+    os.makedirs(temp_dir, exist_ok=True)
+    file_path = os.path.join(temp_dir, file.filename)
+    
+    with open(file_path, "wb") as buffer:
+        shutil.copyfileobj(file.file, buffer)
+        
+    result = load_data(file_path)
+    
+    if os.path.exists(file_path):
+        os.remove(file_path)
+        
+    return {"result": result}
+
+
+@app.post("/api/data/clean", dependencies=[Depends(auth)])
+async def data_clean():
+    return {"result": clean_data()}
+
+
+@app.post("/api/data/sql", dependencies=[Depends(auth)])
+async def data_sql(query: str = Form(...)):
+    return {"result": run_sql_query(query)}
+
+
+@app.post("/api/data/charts", dependencies=[Depends(auth)])
+async def data_charts():
+    return {"result": generate_charts()}
+
+
+@app.post("/api/data/stats", dependencies=[Depends(auth)])
+async def data_stats():
+    return {"result": statistical_analysis()}
+
+
+# ==========================================
+# CODE DOCUMENTATION ENDPOINTS
+# ==========================================
+
+@app.post("/api/code/scan", dependencies=[Depends(auth)])
+async def code_scan(req: PathRequest):
+    return {"result": scan_codebase(req.path)}
+
+
+@app.post("/api/code/readme", dependencies=[Depends(auth)])
+async def code_readme(req: PathRequest):
+    return {"result": generate_readme(req.path)}
+
+
+@app.post("/api/code/analyze", dependencies=[Depends(auth)])
+async def code_analyze(file: UploadFile = File(...)):
+    # Save uploaded .py file temporarily
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".py") as tmp:
+        shutil.copyfileobj(file.file, tmp)
+        tmp_path = tmp.name
+    
+    try:
+        result = analyze_functions(tmp_path)
+    finally:
+        os.remove(tmp_path)
+    
+    return {"result": result}
+
+
+@app.post("/api/code/docstrings", dependencies=[Depends(auth)])
+async def code_docstrings(file: UploadFile = File(...)):
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".py") as tmp:
+        shutil.copyfileobj(file.file, tmp)
+        tmp_path = tmp.name
+    
+    try:
+        result = write_docstrings(tmp_path)
+    finally:
+        os.remove(tmp_path)
+    
+    return {"result": result}

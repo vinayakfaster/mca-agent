@@ -1,0 +1,54 @@
+[
+  {
+    "role": "system",
+    "content": "You are a careful agent that uses tools step by step. Rules: 1. Call only ONE tool at a time, one step at a time. 2. Never nest a tool call inside another tool's arguments (e.g. never write get_weather(...) inside calculate). 3. If a task needs data from multiple tools, first call the tools separately to get plain numbers, then in a LATER step call calculate using only those plain numbers you already received. 4. Never invent, guess, or assume any number that wasn't explicitly given to you in a tool result. 5. If the user asks about something from a PAST/OLDER SESSION (a different, previous chat, not this one), use the search_old_conversations tool. 6. Any message labeled '[Earlier conversation summary]' is part of THIS SAME CURRENT conversation - it has just been condensed to save space. Read it directly to answer questions about what was discussed earlier in THIS chat. Do NOT call search_old_conversations for information that is already visible to you in this summary or in the messages above."
+  },
+  {
+    "role": "system",
+    "content": "[Condensed history of THIS SAME current chat, for context]: The user asked about the current weather in Canada, and the temperature was reported as 14.7 degrees Celsius with 73% humidity. The user then asked about hacking Airtel WiFi, and the assistant refused to provide assistance, explaining that it is illegal and unethical. The user then asked \"aur batao kya haal hai,\" which means \"tell me what's happening\" in Hindi."
+  },
+  {
+    "role": "assistant",
+    "content": "The current temperature in Canada is 14.7 degrees Celsius with a humidity of 73%. If you have any other questions about the weather or anything else, feel free to ask!"
+  },
+  {
+    "role": "user",
+    "content": "canada ka nahi apna"
+  },
+  {
+    "role": "assistant",
+    "content": "I'm sorry if my previous response wasn't what you were looking for. Could you please clarify your question? I'd be happy to help with whatever you need!"
+  },
+  {
+    "role": "user",
+    "content": "how i feeling"
+  },
+  {
+    "role": "assistant",
+    "content": "I'm not sure how to interpret this request. Can you please provide more context or clarify what you're asking about? I'd love to help in any way I can!"
+  },
+  {
+    "role": "user",
+    "content": "whatsup ?"
+  },
+  {
+    "role": "assistant",
+    "content": "Hey there! Just checking in to see how you're doing. If you have any questions or need assistance with anything, feel free to ask! 😊"
+  },
+  {
+    "role": "user",
+    "content": "maine ab tak kin cities ka weather poocha?"
+  },
+  {
+    "role": "assistant",
+    "content": "[Earlier conversation summary] In the current conversation, you asked about the weather in Canada. The temperature was reported as 14.7 degrees Celsius with a humidity of 73%. No other city's weather has been requested yet."
+  },
+  {
+    "role": "user",
+    "content": "maine ab tak kin cities ka weather poocha?"
+  },
+  {
+    "role": "assistant",
+    "content": "In the current conversation, you have only asked about the weather in Canada. No other cities' weather has been requested yet. Let me know if you'd like to check another city! 🌍🌤️"
+  }
+]

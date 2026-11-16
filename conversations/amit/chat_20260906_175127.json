@@ -1,0 +1,186 @@
+[
+  {
+    "role": "system",
+    "content": "You are a careful agent that uses tools step by step. Rules: 1. Call only ONE tool at a time, one step at a time. 2. Never nest a tool call inside another tool's arguments (e.g. never write get_weather(...) inside calculate). 3. If a task needs data from multiple tools, first call the tools separately to get plain numbers, then in a LATER step call calculate using only those plain numbers you already received. 4. Never invent, guess, or assume any number that wasn't explicitly given to you in a tool result. 5. If the user asks about something from a PAST/OLDER SESSION (a different, previous chat, not this one), use the search_old_conversations tool. 6. Any message labeled '[Earlier conversation summary]' is part of THIS SAME CURRENT conversation - it has just been condensed to save space. Read it directly to answer questions about what was discussed earlier in THIS chat. Do NOT call search_old_conversations for information that is already visible to you in this summary or in the messages above."
+  },
+  {
+    "role": "user",
+    "content": "ajtak tumse kya baat hui meri"
+  },
+  {
+    "role": "assistant",
+    "content": "[Earlier conversation summary] There is no prior conversation to reference in this session. Please let me know what you would like to discuss!"
+  },
+  {
+    "role": "user",
+    "content": "i want to get summry of all the chats i have done with u"
+  },
+  {
+    "role": "assistant",
+    "content": "[Earlier conversation summary] There is no prior conversation to reference in this session. Please let me know what you would like to discuss!"
+  },
+  {
+    "role": "user",
+    "content": "how many contries weather i asked u till now"
+  },
+  {
+    "role": "assistant",
+    "content": "",
+    "tool_calls": [
+      {
+        "id": "call_uz7avchi",
+        "function": {
+          "index": 0,
+          "name": "search_old_conversations",
+          "arguments": {
+            "query": "weather"
+          }
+        }
+      }
+    ]
+  },
+  {
+    "role": "tool",
+    "content": "[chat_20260826_120116] user: as of now how many citys weather i asked u for\n[chat_20260826_120116] assistant: The current weather in Noida is 33.2°C with a humidity of 60%.\n[chat_20260826_120116] assistant: I don't have any specific information about Bangalore at the moment. However, if you're asking for the weather in Bangalore, I can provide that! Would you like to know the current weather there?\n[chat_20260826_121158] user: maine ab tak kin cities ka weather poocha?\n[chat_20260826_121158] assistant: It seems there is no previous conversation about cities' weather. Let me know if you want to check the weather for any specific city! 😊"
+  },
+  {
+    "role": "assistant",
+    "content": "It appears that based on the search, there isn't a clear record of all the cities you've asked about weather for in our conversations so far. If you'd like, we can go through your questions one by one to keep track or check specific city weather details! Let me know how I can assist further. 😊"
+  },
+  {
+    "role": "user",
+    "content": "calculate 2+2+9-8*10+8/8 "
+  },
+  {
+    "role": "assistant",
+    "content": "",
+    "tool_calls": [
+      {
+        "id": "call_t0lsonjo",
+        "function": {
+          "index": 0,
+          "name": "calculate",
+          "arguments": {
+            "expression": "2 + 2 + 9 - 8 * 10 + 8 / 8"
+          }
+        }
+      }
+    ]
+  },
+  {
+    "role": "tool",
+    "content": "Result: -66.0"
+  },
+  {
+    "role": "assistant",
+    "content": "The result of the calculation $2 + 2 + 9 - 8 \\times 10 + 8 \\div 8$ is **-66.0**. Let me know if you need further assistance! 😊"
+  },
+  {
+    "role": "user",
+    "content": "weather in delhi, mumbai,pune,basti up ,lucknow"
+  },
+  {
+    "role": "assistant",
+    "content": "",
+    "tool_calls": [
+      {
+        "id": "call_sweiuphd",
+        "function": {
+          "index": 0,
+          "name": "get_weather",
+          "arguments": {
+            "city": "delhi"
+          }
+        }
+      }
+    ]
+  },
+  {
+    "role": "tool",
+    "content": "The temperature in delhi is exactly 28.6 degrees Celsius, humidity 80%."
+  },
+  {
+    "role": "assistant",
+    "content": "",
+    "tool_calls": [
+      {
+        "id": "call_6br6lzj8",
+        "function": {
+          "index": 0,
+          "name": "get_weather",
+          "arguments": {
+            "city": "mumbai"
+          }
+        }
+      }
+    ]
+  },
+  {
+    "role": "tool",
+    "content": "The temperature in mumbai is exactly 27.2 degrees Celsius, humidity 79%."
+  },
+  {
+    "role": "assistant",
+    "content": "",
+    "tool_calls": [
+      {
+        "id": "call_3mqb6th0",
+        "function": {
+          "index": 0,
+          "name": "get_weather",
+          "arguments": {
+            "city": "pune"
+          }
+        }
+      }
+    ]
+  },
+  {
+    "role": "tool",
+    "content": "The temperature in pune is exactly 24.8 degrees Celsius, humidity 80%."
+  },
+  {
+    "role": "assistant",
+    "content": "",
+    "tool_calls": [
+      {
+        "id": "call_mpnp6sv8",
+        "function": {
+          "index": 0,
+          "name": "get_weather",
+          "arguments": {
+            "city": "basti up"
+          }
+        }
+      }
+    ]
+  },
+  {
+    "role": "tool",
+    "content": "'basti up' naam ka shehar nahi mila."
+  },
+  {
+    "role": "assistant",
+    "content": "",
+    "tool_calls": [
+      {
+        "id": "call_sfmbdpr1",
+        "function": {
+          "index": 0,
+          "name": "get_weather",
+          "arguments": {
+            "city": "lucknow"
+          }
+        }
+      }
+    ]
+  },
+  {
+    "role": "tool",
+    "content": "The temperature in lucknow is exactly 26.6 degrees Celsius, humidity 95%."
+  },
+  {
+    "role": "assistant",
+    "content": "Here's the weather information for the cities you requested:\n\n- **Delhi**: Temperature - 28.6°C, Humidity - 80%\n- **Mumbai**: Temperature - 27.2°C, Humidity - 79%\n- **Pune**: Temperature - 24.8°C, Humidity - 80%\n- **Lucknow**: Temperature - 26.6°C, Humidity - 95%\n\nUnfortunately, the weather for \"Basti UP\" could not be found. Let me know if you'd like to check another city! 😊"
+  }
+]

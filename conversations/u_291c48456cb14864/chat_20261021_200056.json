@@ -1,0 +1,98 @@
+[
+  {
+    "role": "system",
+    "content": "You are a careful agent that uses tools step by step. Rules: 1. Call only ONE tool at a time, one step at a time. 2. Never nest a tool call inside another tool's arguments (e.g. never write get_weather(...) inside calculate). 3. If a task needs data from multiple tools, first call the tools separately to get plain numbers, then in a LATER step call calculate using only those plain numbers you already received. 4. Never invent, guess, or assume any number that wasn't explicitly given to you in a tool result. 5. If the user asks about something from a PAST/OLDER SESSION (a different, previous chat, not this one), use the search_old_conversations tool. 6. Any message labeled '[Earlier conversation summary]' is part of THIS SAME CURRENT conversation - it has just been condensed to save space. Read it directly to answer questions about what was discussed earlier in THIS chat. Do NOT call search_old_conversations for information that is already visible to you in this summary or in the messages above. 7. If the user asks for multiple items (e.g. weather for several cities), you must keep calling the tool for EACH remaining item, one at a time, until ALL of them are done. Do NOT write a text message like 'I will now check X' instead of calling the tool - that is treated as your FINAL answer and stops you from continuing. Only write your final text answer after every requested item has been fetched via a tool call."
+  },
+  {
+    "role": "user",
+    "content": "hi"
+  },
+  {
+    "role": "assistant",
+    "content": "Hello! How can I assist you today? 😊"
+  },
+  {
+    "role": "user",
+    "content": "weather in bangcock"
+  },
+  {
+    "role": "assistant",
+    "content": "",
+    "tool_calls": [
+      {
+        "id": "call_i39b7np2",
+        "function": {
+          "index": 0,
+          "name": "get_weather",
+          "arguments": {
+            "city": "bangcock"
+          }
+        }
+      }
+    ]
+  },
+  {
+    "role": "tool",
+    "content": "'bangcock' naam ka shehar nahi mila."
+  },
+  {
+    "role": "assistant",
+    "content": "It seems there might be a typo in the city name. Could you please check and provide the correct name of the city? 😊"
+  },
+  {
+    "role": "user",
+    "content": "Bangkok"
+  },
+  {
+    "role": "assistant",
+    "content": "",
+    "tool_calls": [
+      {
+        "id": "call_w49upzlc",
+        "function": {
+          "index": 0,
+          "name": "get_weather",
+          "arguments": {
+            "city": "Bangkok"
+          }
+        }
+      }
+    ]
+  },
+  {
+    "role": "tool",
+    "content": "The temperature in Bangkok is exactly 27.3 degrees Celsius, humidity 87%."
+  },
+  {
+    "role": "assistant",
+    "content": "The current weather in Bangkok is 27.3 degrees Celsius with a humidity of 87%. 😊 Let me know if you need anything else!"
+  },
+  {
+    "role": "user",
+    "content": "mumbai?"
+  },
+  {
+    "role": "assistant",
+    "content": "",
+    "tool_calls": [
+      {
+        "id": "call_orsqsu79",
+        "function": {
+          "index": 0,
+          "name": "get_weather",
+          "arguments": {
+            "city": "Mumbai"
+          }
+        }
+      }
+    ]
+  },
+  {
+    "role": "tool",
+    "content": "The temperature in Mumbai is exactly 31.2 degrees Celsius, humidity 65%."
+  },
+  {
+    "role": "assistant",
+    "content": "The current weather in Mumbai is 31.2 degrees Celsius with a humidity of 65%. 😊 Let me know if you need anything else!"
+  }
+]

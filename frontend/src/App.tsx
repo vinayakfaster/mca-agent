@@ -1,4 +1,10 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState, type MouseEvent as RMouseEvent, type ReactNode } from "react";
+import {
+  AnimatePresence, MotionConfig, motion, useReducedMotion, useScroll, useSpring, useTransform,
+  type MotionValue, type Variants,
+} from "framer-motion";
+
+/* ───────────────────────── config, types, constants ───────────────────────── */
 
 const API = ((import.meta.env.VITE_API_BASE_URL as string | undefined) || "http://localhost:8000").replace(/\/$/, "");
 type Msg = { role: "user" | "assistant"; content: string };
@@ -8,14 +14,32 @@ const NAV = [["dashboard","Dashboard"],["chat","AI Chat"],["study","Study Compan
   ["code","Code Documentation"],["pay","x402 Payments"],["history","History"],["about","About Project"]] as const;
 type Tab = (typeof NAV)[number][0];
 
+const store = {
+  get(k: string): string | null { try { return localStorage.getItem(k); } catch { return null; } },
+  set(k: string, v: string) { try { localStorage.setItem(k, v); } catch { /* ignore */ } },
+  del(k: string) { try { localStorage.removeItem(k); } catch { /* ignore */ } },
+};
+const randomId = () => {
+  try { return crypto.randomUUID().replace(/-/g, ""); }
+  catch { return (Math.random().toString(36).slice(2) + Date.now().toString(36) + Math.random().toString(36).slice(2)).padEnd(16, "0"); }
+};
 const USER = (() => {
-  let v = localStorage.getItem("uid");
-  if (!v) { v = "u_" + crypto.randomUUID().replace(/-/g, "").slice(0, 16); localStorage.setItem("uid", v); }
+  let v = store.get("uid");
+  if (!v) { v = "u_" + randomId().slice(0, 16); store.set("uid", v); }
   return v;
 })();
 
 async function api<T>(path: string, key: string, init: RequestInit = {}): Promise<T> {
-  const r = await fetch(API + path, { ...init, headers: { "Content-Type": "application/json", "X-API-Key": key, "ngrok-skip-browser-warning": "1" } });
+  const headers: Record<string, string> = { 
+    "X-API-Key": key, 
+    "ngrok-skip-browser-warning": "1" 
+  };
+  
+  if (!(init.body instanceof FormData)) {
+    headers["Content-Type"] = "application/json";
+  }
+
+  const r = await fetch(API + path, { ...init, headers });
   if (!r.ok) {
     let d = `Request failed (${r.status})`;
     try { const j = await r.json(); if (j.detail) d = j.detail; } catch { /* ignore */ }
@@ -24,11 +48,736 @@ async function api<T>(path: string, key: string, init: RequestInit = {}): Promis
   return r.json();
 }
 
-const Dot = ({ ok }: { ok: boolean }) => <span className={`inline-block h-2.5 w-2.5 rounded-full ${ok ? "bg-teal-400" : "bg-red-400"}`} />;
+/* ───────────────────────── motion helpers ───────────────────────── */
 
-export default function App() {
-  const [key, setKey] = useState(localStorage.getItem("apikey") || "");
-  const [keyInput, setKeyInput] = useState("");
+const EASE = [0.22, 1, 0.36, 1] as const;
+const rise: Variants = { hidden: { opacity: 0, y: 26 }, show: { opacity: 1, y: 0, transition: { duration: 0.6, ease: EASE } } };
+const stagger: Variants = { hidden: {}, show: { transition: { staggerChildren: 0.08 } } };
+
+function Stagger({ children, className = "" }: { children: ReactNode; className?: string }) {
+  return (
+    <motion.div className={className} variants={stagger} initial="hidden" whileInView="show" viewport={{ once: true, margin: "-60px" }}>
+      {children}
+    </motion.div>);
+}
+
+function Spot({ children, className = "" }: { children: ReactNode; className?: string }) {
+  const reduced = useReducedMotion();
+  const rx = useSpring(0, { stiffness: 220, damping: 22 });
+  const ry = useSpring(0, { stiffness: 220, damping: 22 });
+  const onMove = (e: RMouseEvent<HTMLDivElement>) => {
+    const r = e.currentTarget.getBoundingClientRect();
+    const x = e.clientX - r.left, y = e.clientY - r.top;
+    e.currentTarget.style.setProperty("--mx", x + "px");
+    e.currentTarget.style.setProperty("--my", y + "px");
+    if (!reduced) { ry.set((x / r.width - 0.5) * 7); rx.set(-(y / r.height - 0.5) * 7); }
+  };
+  const reset = () => { rx.set(0); ry.set(0); };
+  return (
+    <motion.div onMouseMove={onMove} onMouseLeave={reset} style={{ rotateX: rx, rotateY: ry, transformPerspective: 900 }}
+      className={`spot rounded-2xl border border-line bg-surface/80 ${className}`}>
+      {children}
+    </motion.div>);
+}
+
+/* ───────────────────────── icons ───────────────────────── */
+
+const ICONS: Record<string, ReactNode> = {
+  dashboard: <><rect x="3" y="3" width="7.5" height="7.5" rx="2" /><rect x="13.5" y="3" width="7.5" height="7.5" rx="2" /><rect x="3" y="13.5" width="7.5" height="7.5" rx="2" /><rect x="13.5" y="13.5" width="7.5" height="7.5" rx="2" /></>,
+  chat: <path d="M21 12a8 8 0 0 1-11.6 7.1L4 20.5l1.2-4.4A8 8 0 1 1 21 12Z" />,
+  study: <><path d="M4 5.5A2.5 2.5 0 0 1 6.5 3H20v15H6.5A2.5 2.5 0 0 0 4 20.5v-15Z" /><path d="M8 7.5h8M8 11h5" /></>,
+  data: <path d="M4 20V11M10 20V4M16 20v-7M22 20H2" />,
+  code: <path d="m8 8-5 4 5 4M16 8l5 4-5 4M14 5l-4 14" />,
+  pay: <><circle cx="12" cy="12" r="9" /><path d="M14.5 9.5h-3.2a1.8 1.8 0 0 0 0 3.6h1.4a1.8 1.8 0 0 1 0 3.6H9.5M12 7v10" /></>,
+  history: <><circle cx="12" cy="12" r="9" /><path d="M12 7v5l3 2" /></>,
+  about: <><circle cx="12" cy="12" r="9" /><path d="M12 11v5M12 8h.01" /></>,
+  sun: <><circle cx="12" cy="12" r="4" /><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4" /></>,
+  moon: <path d="M20 14.5A8 8 0 0 1 9.5 4a8.5 8.5 0 1 0 10.5 10.5Z" />,
+  copy: <><rect x="8" y="8" width="12" height="12" rx="2.5" /><path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2" /></>,
+  check: <path d="m5 12.5 4.5 4.5L19 7.5" />,
+  send: <path d="M5 12h14M13 6l6 6-6 6" />,
+  menu: <path d="M4 7h16M4 12h16M4 17h16" />,
+  eye: <><path d="M2 12s3.6-7 10-7 10 7 10 7-3.6 7-10 7S2 12 2 12Z" /><circle cx="12" cy="12" r="3" /></>,
+  eyeoff: <><path d="M3 3l18 18M10.6 5.1A9.7 9.7 0 0 1 12 5c6.4 0 10 7 10 7a17 17 0 0 1-3.2 4M6.5 6.6A17 17 0 0 0 2 12s3.6 7 10 7a9.6 9.6 0 0 0 4.2-1M9.9 9.9a3 3 0 0 0 4.2 4.2" /></>,
+  chevron: <path d="m9 6 6 6-6 6" />,
+  lock: <><rect x="4" y="10.5" width="16" height="10" rx="2.5" /><path d="M8 10.5V8a4 4 0 0 1 8 0v2.5" /></>,
+  cpu: <><rect x="6" y="6" width="12" height="12" rx="2.5" /><path d="M9 2v3M15 2v3M9 19v3M15 19v3M2 9h3M2 15h3M19 9h3M19 15h3" /></>,
+  tool: <path d="M14.5 6.5a4 4 0 0 0 4.9 4.9L21 13l-8 8-3-3 8-8-1.5-1.5ZM3 21l5-5" />,
+  stop: <rect x="6.5" y="6.5" width="11" height="11" rx="2.5" fill="currentColor" />,
+  edit: <path d="M4 20h4L19 9a2.8 2.8 0 0 0-4-4L4 16v4ZM13.5 6.5l4 4" />,
+  upload: <><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" /><polyline points="17 8 12 3 7 8" /><line x1="12" y1="3" x2="12" y2="15" /></>,
+};
+function Icon({ name, className = "h-5 w-5" }: { name: string; className?: string }) {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.8} strokeLinecap="round" strokeLinejoin="round" className={className} aria-hidden="true">
+      {ICONS[name]}
+    </svg>);
+}
+
+/* ───────────────────────── small shared pieces ───────────────────────── */
+
+const Dot = ({ ok, label }: { ok: boolean; label?: string }) => (
+  <span className="relative inline-flex h-2.5 w-2.5 shrink-0" role="img" aria-label={label ?? (ok ? "online" : "offline")}>
+    {ok && <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-brand opacity-60 motion-reduce:animate-none" />}
+    <span className={`relative inline-flex h-2.5 w-2.5 rounded-full ${ok ? "bg-brand" : "bg-danger"}`} />
+  </span>);
+
+function useTheme() {
+  const [dark, setDark] = useState(() => document.documentElement.classList.contains("dark"));
+  const toggle = () => {
+    const next = !dark;
+    setDark(next);
+    document.documentElement.classList.toggle("dark", next);
+    store.set("theme", next ? "dark" : "light");
+    document.querySelector('meta[name="theme-color"]')?.setAttribute("content", next ? "#07080d" : "#f3f5fa");
+  };
+  return { dark, toggle };
+}
+
+function useCopy(): [boolean, (t: string) => void] {
+  const [done, setDone] = useState(false);
+  const copy = (t: string) => {
+    const ok = () => { setDone(true); setTimeout(() => setDone(false), 1600); };
+    if (navigator.clipboard?.writeText) navigator.clipboard.writeText(t).then(ok, () => { /* ignore */ });
+    else {
+      const a = document.createElement("textarea"); a.value = t; a.style.position = "fixed"; a.style.opacity = "0";
+      document.body.appendChild(a); a.select();
+      try { document.execCommand("copy"); ok(); } catch { /* ignore */ }
+      a.remove();
+    }
+  };
+  return [done, copy];
+}
+
+function ThemeToggle({ dark, onToggle }: { dark: boolean; onToggle: () => void }) {
+  return (
+    <button onClick={onToggle} aria-label={dark ? "Switch to light theme" : "Switch to dark theme"}
+      className="grid h-9 w-9 place-items-center overflow-hidden rounded-lg border border-line text-muted transition hover:border-brand hover:text-fg focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-brand">
+      <AnimatePresence mode="wait" initial={false}>
+        <motion.span key={dark ? "moon" : "sun"} initial={{ rotate: -80, opacity: 0, scale: 0.6 }} animate={{ rotate: 0, opacity: 1, scale: 1 }}
+          exit={{ rotate: 80, opacity: 0, scale: 0.6 }} transition={{ duration: 0.22 }}>
+          <Icon name={dark ? "moon" : "sun"} className="h-[18px] w-[18px]" />
+        </motion.span>
+      </AnimatePresence>
+    </button>);
+}
+
+function ScrollBar() {
+  const { scrollYProgress } = useScroll();
+  const scaleX = useSpring(scrollYProgress, { stiffness: 120, damping: 28, restDelta: 0.001 });
+  return <motion.div aria-hidden style={{ scaleX }} className="fixed inset-x-0 top-0 z-50 h-0.5 origin-left bg-linear-to-r from-brand to-brand2" />;
+}
+
+function Aurora() {
+  const { scrollY } = useScroll();
+  const y1 = useTransform(scrollY, [0, 1600], [0, -280]);
+  const y2 = useTransform(scrollY, [0, 1600], [0, 220]);
+  return (
+    <div aria-hidden className="pointer-events-none fixed inset-0 z-0 overflow-hidden">
+      <motion.div style={{ y: y1 }} className="absolute -left-40 -top-48 h-[36rem] w-[36rem]">
+        <div className="drift h-full w-full rounded-full bg-brand/15 blur-3xl dark:bg-brand/12" />
+      </motion.div>
+      <motion.div style={{ y: y2 }} className="absolute -right-48 top-1/3 h-[34rem] w-[34rem]">
+        <div className="drift h-full w-full rounded-full bg-brand2/15 blur-3xl [animation-delay:-9s]" />
+      </motion.div>
+    </div>);
+}
+
+/* ───────────────────────── chat message rendering ───────────────────────── */
+
+function Inline({ text }: { text: string }) {
+  const segs = text.split(/(`[^`\n]+`)/g);
+  return (
+    <span className="whitespace-pre-wrap break-words">
+      {segs.map((s, i) => s.length > 2 && s.startsWith("`") && s.endsWith("`")
+        ? <code key={i} className="rounded bg-fg/10 px-1.5 py-0.5 font-mono text-[0.85em]">{s.slice(1, -1)}</code>
+        : s)}
+    </span>);
+}
+
+function CodeBlock({ lang, code }: { lang: string; code: string }) {
+  const [copied, copy] = useCopy();
+  return (
+    <div className="my-2 overflow-hidden rounded-xl border border-line bg-bg">
+      <div className="flex items-center justify-between border-b border-line px-3 py-1.5 text-xs text-muted">
+        <span className="font-mono">{lang || "code"}</span>
+        <button onClick={() => copy(code)} className="inline-flex items-center gap-1 rounded px-1.5 py-0.5 transition hover:text-fg focus-visible:outline-2 focus-visible:outline-brand">
+          <Icon name={copied ? "check" : "copy"} className="h-3.5 w-3.5" />{copied ? "Copied" : "Copy"}
+        </button>
+      </div>
+      <pre className="overflow-x-auto p-3 font-mono text-[13px] leading-relaxed text-fg"><code>{code}</code></pre>
+    </div>);
+}
+
+function Body({ text }: { text: string }) {
+  const parts = text.split(/```(\w*)\n?([\s\S]*?)```/g);
+  const out: ReactNode[] = [];
+  for (let i = 0; i < parts.length; i += 3) {
+    if (parts[i]) out.push(<Inline key={i} text={parts[i]} />);
+    if (i + 2 < parts.length) out.push(<CodeBlock key={i + 1} lang={parts[i + 1]} code={parts[i + 2].replace(/\n$/, "")} />);
+  }
+  return <>{out}</>;
+}
+
+const Avatar = () => (
+  <span aria-hidden className="mb-1 grid h-7 w-7 shrink-0 place-items-center rounded-full bg-linear-to-br from-brand to-brand2 font-display text-xs font-bold text-brandfg shadow-[0_0_18px_-4px_var(--brand)]">A</span>);
+
+function Bubble({ m, onEdit }: { m: Msg; onEdit?: () => void }) {
+  const user = m.role === "user";
+  const [copied, copy] = useCopy();
+  return (
+    <motion.div initial={{ opacity: 0, y: 14, scale: 0.98 }} animate={{ opacity: 1, y: 0, scale: 1 }} transition={{ duration: 0.35, ease: EASE }}
+      className={`group flex items-end gap-2 ${user ? "justify-end" : "justify-start"}`}>
+      {!user && <Avatar />}
+      <div className={`max-w-[85%] min-w-0 ${user ? "flex flex-col items-end" : ""}`}>
+        <div className={`rounded-2xl px-4 py-2.5 leading-relaxed ${user ? "rounded-br-md bg-brand text-brandfg shadow-[0_8px_24px_-12px_var(--brand)]" : "rounded-bl-md border border-line bg-surface2"}`}>
+          <Body text={m.content} />
+        </div>
+        {!user && (
+          <button onClick={() => copy(m.content)} aria-label="Copy reply"
+            className="ml-1 mt-1 inline-flex items-center gap-1 text-xs text-muted transition hover:text-fg focus-visible:opacity-100 focus-visible:outline-2 focus-visible:outline-brand sm:opacity-0 sm:group-hover:opacity-100">
+            <Icon name={copied ? "check" : "copy"} className="h-3.5 w-3.5" />{copied ? "Copied" : "Copy"}
+          </button>)}
+        {user && onEdit && (
+          <button onClick={onEdit} aria-label="Edit message"
+            className="mr-1 mt-1 inline-flex items-center gap-1 text-xs text-muted transition hover:text-fg focus-visible:opacity-100 focus-visible:outline-2 focus-visible:outline-brand sm:opacity-0 sm:group-hover:opacity-100">
+            <Icon name="edit" className="h-3.5 w-3.5" />Edit
+          </button>)}
+      </div>
+    </motion.div>);
+}
+
+function Typing() {
+  return (
+    <motion.div initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} className="flex items-end gap-2">
+      <Avatar />
+      <div className="rounded-2xl rounded-bl-md border border-line bg-surface2 px-4 py-3" aria-hidden>
+        <span className="flex gap-1.5">{[0, 1, 2].map(i => <span key={i} className="typing-dot block h-2 w-2 rounded-full bg-brand" style={{ animationDelay: `${i * 0.16}s` }} />)}</span>
+      </div>
+      <p className="mb-1 text-sm text-muted">Agent is thinking… local models can take a while.</p>
+    </motion.div>);
+}
+
+const SUGGESTIONS = ["What's the weather in Delhi right now?", "Calculate 18% GST on 2,450", "What did we talk about earlier?"];
+
+function EmptyChat({ onPick }: { onPick: (t: string) => void }) {
+  return (
+    <div className="grid h-full place-items-center">
+      <div className="max-w-md text-center">
+        <motion.div animate={{ y: [0, -6, 0] }} transition={{ duration: 4, repeat: Infinity, ease: "easeInOut" }}
+          className="mx-auto mb-5 h-16 w-16 rounded-full bg-linear-to-br from-brand to-brand2 shadow-[0_0_60px_-8px_var(--brand)]" aria-hidden />
+        <p className="text-muted">Ask about the weather in a city, a calculation, or something from an earlier chat.</p>
+        <div className="mt-5 flex flex-wrap justify-center gap-2">
+          {SUGGESTIONS.map(s => (
+            <button key={s} onClick={() => onPick(s)}
+              className="rounded-full border border-line bg-surface px-3 py-1.5 text-sm text-muted transition hover:border-brand hover:text-fg focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-brand">{s}</button>))}
+        </div>
+      </div>
+    </div>);
+}
+
+/* ───────────────────────── dashboard ───────────────────────── */
+
+const STACK = ["React", "Vite", "TypeScript", "Tailwind CSS", "FastAPI", "Python", "Ollama", "Open-Meteo"];
+
+function StackStrip() {
+  const { scrollY } = useScroll();
+  const x = useTransform(scrollY, v => -v * 0.45);
+  const words = [...STACK, ...STACK, ...STACK];
+  return (
+    <div aria-hidden className="overflow-hidden border-y border-line py-6">
+      <motion.div style={{ x }} className="flex w-max items-center whitespace-nowrap font-display text-5xl font-semibold text-fg/10 md:text-7xl">
+        {words.map((w, i) => <span key={i} className="flex items-center">{w}<span className="mx-8 text-2xl text-brand/60 md:mx-12">✦</span></span>)}
+      </motion.div>
+    </div>);
+}
+
+function Dashboard({ health, mods, go }: { health: Health | null; mods: Mod[]; go: () => void }) {
+  const hero = useRef<HTMLDivElement>(null);
+  const { scrollYProgress } = useScroll({ target: hero, offset: ["start start", "end start"] });
+  const textY = useTransform(scrollYProgress, [0, 1], [0, 120]);
+  const fade = useTransform(scrollYProgress, [0, 0.85], [1, 0]);
+  const ringA = useTransform(scrollYProgress, [0, 1], [0, 140]);
+  const ringB = useTransform(scrollYProgress, [0, 1], [0, -200]);
+  const orbY = useTransform(scrollYProgress, [0, 1], [0, -90]);
+  const orbScale = useTransform(scrollYProgress, [0, 1], [1, 1.25]);
+  const chipA = useTransform(scrollYProgress, [0, 1], [0, -160]);
+  const chipB = useTransform(scrollYProgress, [0, 1], [0, 90]);
+
+  const pillars = [
+    ["cpu", "Runs on your machine", "Inference happens in Ollama on the host computer, not in a cloud API."],
+    ["lock", "Private by access key", "Every request carries the access key you set in the backend .env file."],
+    ["tool", "Uses tools, not just text", "The agent can look up weather through Open-Meteo, do calculations and recall earlier chats."],
+  ] as const;
+
+  return (
+    <div className="mx-auto max-w-5xl">
+      <div ref={hero} className="relative grid min-h-[78vh] items-center gap-10 md:grid-cols-[1.15fr_1fr]">
+        <div aria-hidden className="grid-bg pointer-events-none absolute inset-x-[-10%] inset-y-0" />
+        <motion.div style={{ y: textY, opacity: fade }} className="relative">
+          <motion.p initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.1 }}
+            className="mb-4 inline-flex items-center gap-2 rounded-full border border-line bg-surface/70 px-3 py-1 text-sm text-muted">
+            <Dot ok={!!health?.ollama} label={health?.ollama ? "Ollama online" : "Ollama offline"} />
+            {health?.model ?? "qwen3:8b"} · MCA010
+          </motion.p>
+          <h2 className="font-display text-5xl font-bold leading-[1.02] tracking-tight md:text-7xl">
+            {["Local LLM-Based", "AI Agent"].map((line, i) => (
+              <span key={line} className="block overflow-hidden pb-1">
+                <motion.span className={`block ${i === 1 ? "text-gradient" : ""}`} initial={{ y: "105%" }} animate={{ y: 0 }}
+                  transition={{ duration: 0.8, delay: 0.15 + i * 0.12, ease: EASE }}>{line}</motion.span>
+              </span>))}
+          </h2>
+          <motion.p initial={{ opacity: 0 }} animate={{ opacity: 1 }} transition={{ delay: 0.55 }} className="mt-5 max-w-md text-lg text-muted">
+            Study assistance, data analysis, code documentation and x402 micropayments.
+          </motion.p>
+          <motion.div initial={{ opacity: 0, y: 12 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.7 }} className="mt-8">
+            <motion.button whileHover={{ scale: 1.03 }} whileTap={{ scale: 0.97 }} onClick={go}
+              className="rounded-xl bg-brand px-6 py-3 font-medium text-brandfg shadow-[0_10px_40px_-12px_var(--brand)] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-brand">Open chat</motion.button>
+          </motion.div>
+        </motion.div>
+
+        <div aria-hidden className="relative mx-auto aspect-square w-full max-w-sm">
+          <motion.div style={{ rotate: ringA }} className="absolute inset-0 rounded-full border border-line" />
+          <motion.div style={{ rotate: ringB }} className="absolute inset-9 rounded-full border border-dashed border-brand/40" />
+          <motion.div style={{ y: orbY, scale: orbScale }} className="absolute inset-[22%] rounded-full bg-linear-to-br from-brand to-brand2 shadow-[0_0_90px_-10px_var(--brand)]" />
+          <motion.div style={{ y: chipA }} className="glass absolute left-[-4%] top-[14%] rounded-xl border border-line px-3 py-1.5 font-mono text-xs">weather()</motion.div>
+          <motion.div style={{ y: chipB }} className="glass absolute bottom-[16%] right-[-2%] rounded-xl border border-line px-3 py-1.5 font-mono text-xs">calculate()</motion.div>
+          <motion.div style={{ y: chipA }} className="glass absolute bottom-[4%] left-[12%] rounded-xl border border-line px-3 py-1.5 font-mono text-xs">recall()</motion.div>
+        </div>
+
+        <motion.div aria-hidden style={{ opacity: fade }} className="absolute bottom-2 left-1/2 hidden -translate-x-1/2 md:block">
+          <span className="flex h-9 w-5 justify-center rounded-full border border-muted/60 pt-1.5"><span className="wheel block h-1.5 w-0.5 rounded bg-brand" /></span>
+        </motion.div>
+      </div>
+
+      <Stagger className="mt-10 grid gap-3 sm:grid-cols-3">
+        {([
+          ["Backend", !!health, health ? "Reachable" : "Unreachable"],
+          ["Ollama", !!health?.ollama, health?.ollama ? "Reachable" : "Not reachable"],
+          ["Model", !!health?.model_installed, `${health?.model ?? "qwen3:8b"} ${health?.model_installed ? "installed" : "not found"}`],
+        ] as const).map(([name, ok, text]) => (
+          <motion.div key={name} variants={rise}>
+            <Spot className="p-4">
+              <div className="flex items-center gap-2 font-medium"><Dot ok={ok} label={`${name}: ${ok ? "ok" : "problem"}`} />{name}</div>
+              <div className="mt-1 text-sm text-muted">{text}</div>
+            </Spot>
+          </motion.div>))}
+      </Stagger>
+
+      {mods.length > 0 && (
+        <section className="mt-20">
+          <motion.h3 initial={{ opacity: 0, y: 16 }} whileInView={{ opacity: 1, y: 0 }} viewport={{ once: true }} className="font-display text-3xl font-semibold tracking-tight">Modules</motion.h3>
+          <Stagger className="mt-6 grid gap-3 sm:grid-cols-2">
+            {mods.map(m => (
+              <motion.div key={m.id} variants={rise}>
+                <Spot className="h-full p-5">
+                  <div className="flex items-center gap-2"><Dot ok={m.available} label={m.available ? "available" : "not available"} /><span className="font-medium">{m.name}</span>
+                    <span className={`ml-auto rounded-full px-2 py-0.5 text-xs ${m.available ? "bg-brand/15 text-brand" : "bg-warn/15 text-warn"}`}>{m.available ? "Live" : "Not connected"}</span></div>
+                  <p className="mt-2 text-sm text-muted">{m.note}</p>
+                </Spot>
+              </motion.div>))}
+          </Stagger>
+        </section>)}
+
+      <section className="mt-24">
+        <motion.h3 initial={{ opacity: 0, y: 16 }} whileInView={{ opacity: 1, y: 0 }} viewport={{ once: true }}
+          className="max-w-xl font-display text-3xl font-semibold leading-tight tracking-tight md:text-4xl">Built to run on hardware you control.</motion.h3>
+        <Stagger className="mt-8 grid gap-4 md:grid-cols-3">
+          {pillars.map(([icon, title, text]) => (
+            <motion.div key={title} variants={rise}>
+              <Spot className="h-full p-6">
+                <span className="grid h-10 w-10 place-items-center rounded-xl bg-brand/12 text-brand"><Icon name={icon} /></span>
+                <h4 className="mt-4 font-display text-lg font-semibold">{title}</h4>
+                <p className="mt-1.5 text-sm leading-relaxed text-muted">{text}</p>
+              </Spot>
+            </motion.div>))}
+        </Stagger>
+      </section>
+
+      <div className="-mx-4 mt-24 md:-mx-6"><StackStrip /></div>
+
+      <motion.section initial={{ opacity: 0, y: 30 }} whileInView={{ opacity: 1, y: 0 }} viewport={{ once: true }} transition={{ duration: 0.7, ease: EASE }}
+        className="my-24 flex flex-col items-start justify-between gap-6 rounded-3xl border border-line bg-surface/70 p-8 md:flex-row md:items-center md:p-10">
+        <h3 className="max-w-md font-display text-3xl font-semibold leading-tight tracking-tight">Ask the agent something.</h3>
+        <motion.button whileHover={{ scale: 1.03 }} whileTap={{ scale: 0.97 }} onClick={go}
+          className="rounded-xl bg-brand px-6 py-3 font-medium text-brandfg focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-brand">Open chat</motion.button>
+      </motion.section>
+    </div>);
+}
+
+/* ───────────────────────── about: scroll-driven architecture ───────────────────────── */
+
+const FLOW = [
+  ["Browser", "React, Vercel", "HTTPS + access key"],
+  ["Tunnel", "Cloudflare / ngrok", ""],
+  ["FastAPI backend", "run_agent() + tools + conversation_store", "localhost only"],
+  ["Ollama", "qwen3:8b", ""],
+] as const;
+
+function FlowNode({ i, progress, title, sub, link }: { i: number; progress: MotionValue<number>; title: string; sub: string; link: string }) {
+  const s = i / FLOW.length;
+  const opacity = useTransform(progress, [Math.max(0, s - 0.1), s + 0.08], [0.2, 1]);
+  const x = useTransform(progress, [Math.max(0, s - 0.1), s + 0.08], [-28, 0]);
+  return (
+    <motion.div style={{ opacity, x }} className="relative pl-14">
+      <span className="absolute left-0 top-3 grid h-10 w-10 place-items-center rounded-full border border-line bg-surface font-mono text-sm text-brand">{i + 1}</span>
+      <Spot className="p-5">
+        <h3 className="font-display text-xl font-semibold">{title}</h3>
+        <p className="mt-1 font-mono text-sm text-muted">{sub}</p>
+      </Spot>
+      {link && <p className="ml-1 mt-5 font-mono text-xs text-brand">↓ {link}</p>}
+    </motion.div>);
+}
+
+function About() {
+  const ref = useRef<HTMLDivElement>(null);
+  const { scrollYProgress } = useScroll({ target: ref, offset: ["start 70%", "end 60%"] });
+  const fill = useSpring(scrollYProgress, { stiffness: 110, damping: 26 });
+  return (
+    <div className="mx-auto max-w-2xl space-y-6 pb-24">
+      <motion.h2 initial={{ opacity: 0, y: 14 }} animate={{ opacity: 1, y: 0 }} className="font-display text-4xl font-bold tracking-tight">About this project</motion.h2>
+      <p className="leading-relaxed">Local LLM-Based AI Agent for Study Assistance, Data Analysis, Code Documentation and x402 Micropayments. MCA010, JSS University, Noida, Session 2025–26.</p>
+      <p className="text-sm text-muted">Scroll to follow a request from the browser to the model.</p>
+
+      <div ref={ref} className="relative space-y-14 py-6">
+        <div aria-hidden className="absolute bottom-10 left-5 top-10 w-px bg-line">
+          <motion.div style={{ scaleY: fill }} className="h-full w-full origin-top bg-linear-to-b from-brand to-brand2" />
+        </div>
+        {FLOW.map(([title, sub, link], i) => <FlowNode key={title} i={i} progress={fill} title={title} sub={sub} link={link} />)}
+      </div>
+
+      <p className="text-sm text-muted">Stack: React, Vite, TypeScript, Tailwind CSS, FastAPI, Python, Ollama, Open-Meteo.</p>
+    </div>);
+}
+
+/* ───────────────────────── access-key gate ───────────────────────── */
+
+function Gate({ onSubmit, dark, onToggle }: { onSubmit: (k: string) => void; dark: boolean; onToggle: () => void }) {
+  const [value, setValue] = useState("");
+  const [show, setShow] = useState(false);
+  return (
+    <main className="relative grid min-h-dvh place-items-center overflow-hidden bg-bg p-6 text-fg">
+      <Aurora />
+      <div className="absolute right-4 top-4 z-10"><ThemeToggle dark={dark} onToggle={onToggle} /></div>
+      <motion.form initial={{ opacity: 0, y: 24, scale: 0.98 }} animate={{ opacity: 1, y: 0, scale: 1 }} transition={{ duration: 0.7, ease: EASE }}
+        className="glass relative z-10 w-full max-w-sm space-y-4 rounded-3xl border border-line p-7 shadow-2xl shadow-black/10"
+        onSubmit={e => { e.preventDefault(); if (value.trim()) onSubmit(value.trim()); }}>
+        <span className="grid h-11 w-11 place-items-center rounded-2xl bg-linear-to-br from-brand to-brand2 text-brandfg"><Icon name="lock" /></span>
+        <h1 className="font-display text-3xl font-semibold tracking-tight">Enter access key</h1>
+        <p className="text-sm text-muted">This demo is private. Use the key set in the backend .env file.</p>
+        <div className="relative">
+          <input type={show ? "text" : "password"} autoFocus autoComplete="off" value={value} onChange={e => setValue(e.target.value)} aria-label="Access key"
+            className="w-full rounded-xl border border-line bg-surface px-3.5 py-2.5 pr-11 transition focus:border-brand focus:outline-2 focus:outline-brand/40" />
+          <button type="button" onClick={() => setShow(v => !v)} aria-label={show ? "Hide key" : "Show key"}
+            className="absolute right-1.5 top-1.5 grid h-8 w-8 place-items-center rounded-lg text-muted hover:text-fg focus-visible:outline-2 focus-visible:outline-brand"><Icon name={show ? "eyeoff" : "eye"} className="h-[18px] w-[18px]" /></button>
+        </div>
+        <motion.button whileHover={{ scale: 1.02 }} whileTap={{ scale: 0.98 }}
+          className="w-full rounded-xl bg-brand py-2.5 font-medium text-brandfg focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-brand">Continue</motion.button>
+      </motion.form>
+    </main>);
+}
+
+/* ───────────────────────── Study Companion Component ───────────────────────── */
+
+function StudyCompanion({ apiKey }: { apiKey: string }) {
+  const [file, setFile] = useState<File | null>(null);
+  const [topic, setTopic] = useState("");
+  const [result, setResult] = useState("");
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
+
+  const handleUpload = async () => {
+    if (!file) return;
+    setLoading(true); setError(""); setResult("");
+    const formData = new FormData();
+    formData.append("file", file);
+    try {
+      const res = await api<{ message: string }>("/api/study/upload", apiKey, { method: "POST", body: formData });
+      setResult(res.message);
+    } catch (e) { setError((e as Error).message); }
+    setLoading(false);
+  };
+
+  const handleAction = async (action: "search" | "flashcards" | "quiz") => {
+    if (!topic.trim()) return;
+    setLoading(true); setError(""); setResult("");
+    const formData = new FormData();
+    if (action === "search") formData.append("query", topic);
+    else formData.append("topic", topic);
+    
+    try {
+      const res = await api<{ result: string }>(`/api/study/${action}`, apiKey, { method: "POST", body: formData });
+      setResult(res.result);
+    } catch (e) { setError((e as Error).message); }
+    setLoading(false);
+  };
+
+  return (
+    <div className="mx-auto max-w-3xl space-y-6">
+      <div>
+        <h2 className="font-display text-3xl font-bold tracking-tight">Study Companion</h2>
+        <p className="mt-1 text-muted">Upload a PDF, search it, and generate flashcards or quizzes using your local model.</p>
+      </div>
+
+      {error && <div className="rounded-xl border border-danger/30 bg-danger/10 p-3 text-sm text-danger">{error}</div>}
+
+      <Spot className="p-6">
+        <h3 className="font-display text-lg font-semibold flex items-center gap-2"><Icon name="upload" className="h-5 w-5 text-brand" /> 1. Upload PDF</h3>
+        <div className="mt-4 flex flex-col gap-3 sm:flex-row sm:items-center">
+          <input 
+            type="file" 
+            accept=".pdf"
+            onChange={(e) => setFile(e.target.files?.[0] || null)}
+            className="block w-full text-sm text-muted file:mr-4 file:rounded-xl file:border-0 file:bg-brand/10 file:px-4 file:py-2 file:text-sm file:font-semibold file:text-brand hover:file:bg-brand/20 transition"
+          />
+          <button 
+            onClick={handleUpload}
+            disabled={!file || loading}
+            className="rounded-xl bg-brand px-5 py-2 font-medium text-brandfg disabled:opacity-50 focus-visible:outline-2 focus-visible:outline-brand whitespace-nowrap"
+          >
+            {loading ? "Uploading..." : "Upload & Index"}
+          </button>
+        </div>
+      </Spot>
+
+      <Spot className="p-6">
+        <h3 className="font-display text-lg font-semibold flex items-center gap-2"><Icon name="tool" className="h-5 w-5 text-brand" /> 2. Search & Generate</h3>
+        <input 
+          value={topic}
+          onChange={(e) => setTopic(e.target.value)}
+          placeholder="Enter a topic or search query..."
+          className="mt-4 w-full rounded-xl border border-line bg-surface px-3.5 py-2.5 transition focus:border-brand focus:outline-2 focus:outline-brand/40"
+        />
+        <div className="mt-3 flex flex-wrap gap-2">
+          <button onClick={() => handleAction("search")} disabled={!topic.trim() || loading} className="rounded-xl border border-line bg-surface2 px-4 py-2 text-sm font-medium text-fg hover:border-brand disabled:opacity-50 transition">Search Documents</button>
+          <button onClick={() => handleAction("flashcards")} disabled={!topic.trim() || loading} className="rounded-xl bg-teal-600 px-4 py-2 text-sm font-medium text-white hover:bg-teal-700 disabled:opacity-50 transition">Generate Flashcards</button>
+          <button onClick={() => handleAction("quiz")} disabled={!topic.trim() || loading} className="rounded-xl bg-purple-600 px-4 py-2 text-sm font-medium text-white hover:bg-purple-700 disabled:opacity-50 transition">Generate Quiz</button>
+        </div>
+      </Spot>
+
+      {result && (
+        <Spot className="p-6 bg-surface2">
+          <h3 className="font-display text-lg font-semibold mb-3">Result</h3>
+          <pre className="whitespace-pre-wrap font-mono text-sm text-fg/90">{result}</pre>
+        </Spot>
+      )}
+    </div>
+  );
+}
+
+/* ───────────────────────── Data Analysis Component ───────────────────────── */
+
+function DataAnalysis({ apiKey }: { apiKey: string }) {
+  const [file, setFile] = useState<File | null>(null);
+  const [sqlQuery, setSqlQuery] = useState("SELECT * FROM data LIMIT 5;");
+  const [result, setResult] = useState("");
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
+
+  const handleUpload = async () => {
+    if (!file) return;
+    setLoading(true); setError(""); setResult("");
+    const formData = new FormData();
+    formData.append("file", file);
+    try {
+      const res = await api<{ result: string }>("/api/data/upload", apiKey, { method: "POST", body: formData });
+      setResult(res.result);
+    } catch (e) { setError((e as Error).message); }
+    setLoading(false);
+  };
+
+  const handleAction = async (action: "clean" | "charts" | "stats") => {
+    setLoading(true); setError(""); setResult("");
+    try {
+      const res = await api<{ result: string }>(`/api/data/${action}`, apiKey, { method: "POST" });
+      setResult(res.result);
+    } catch (e) { setError((e as Error).message); }
+    setLoading(false);
+  };
+
+  const handleSQL = async () => {
+    if (!sqlQuery.trim()) return;
+    setLoading(true); setError(""); setResult("");
+    const formData = new FormData();
+    formData.append("query", sqlQuery);
+    try {
+      const res = await api<{ result: string }>("/api/data/sql", apiKey, { method: "POST", body: formData });
+      setResult(res.result);
+    } catch (e) { setError((e as Error).message); }
+    setLoading(false);
+  };
+
+  const renderResult = () => {
+    if (!result) return null;
+    const chartLines = result.split("\n").filter(l => l.includes("`/generated_charts/"));
+    
+    return (
+      <Spot className="p-6 bg-surface2">
+        <h3 className="font-display text-lg font-semibold mb-3">Result</h3>
+        <pre className="whitespace-pre-wrap font-mono text-sm text-fg/90">{result.split("\n").filter(l => !l.includes("`/generated_charts/")).join("\n")}</pre>
+        
+        {chartLines.length > 0 && (
+          <div className="mt-6 space-y-4">
+            <h4 className="font-medium text-fg">Generated Charts:</h4>
+            {chartLines.map((line, i) => {
+              const match = line.match(/`\/(.*?)`/);
+              if (!match) return null;
+              const imgPath = `${API}${match[0].replace(/`/g, '')}`;
+              return (
+                <div key={i} className="rounded-xl border border-line overflow-hidden">
+                  <img src={imgPath} alt={`Chart ${i}`} className="w-full h-auto" />
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </Spot>
+    );
+  };
+
+  return (
+    <div className="mx-auto max-w-4xl space-y-6">
+      <div>
+        <h2 className="font-display text-3xl font-bold tracking-tight">Data Analysis</h2>
+        <p className="mt-1 text-muted">Upload CSV/Excel, clean data, run SQL, and visualize.</p>
+      </div>
+
+      {error && <div className="rounded-xl border border-danger/30 bg-danger/10 p-3 text-sm text-danger">{error}</div>}
+
+      <Spot className="p-6">
+        <h3 className="font-display text-lg font-semibold flex items-center gap-2"><Icon name="upload" className="h-5 w-5 text-brand" /> 1. Load Data (CSV / Excel)</h3>
+        <div className="mt-4 flex flex-col gap-3 sm:flex-row sm:items-center">
+          <input 
+            type="file" 
+            accept=".csv, .xls, .xlsx"
+            onChange={(e) => setFile(e.target.files?.[0] || null)}
+            className="block w-full text-sm text-muted file:mr-4 file:rounded-xl file:border-0 file:bg-brand/10 file:px-4 file:py-2 file:text-sm file:font-semibold file:text-brand hover:file:bg-brand/20 transition"
+          />
+          <button onClick={handleUpload} disabled={!file || loading} className="rounded-xl bg-brand px-5 py-2 font-medium text-brandfg disabled:opacity-50 focus-visible:outline-2 focus-visible:outline-brand whitespace-nowrap">
+            {loading ? "Loading..." : "Load Data"}
+          </button>
+        </div>
+      </Spot>
+
+      <Spot className="p-6">
+        <h3 className="font-display text-lg font-semibold flex items-center gap-2"><Icon name="tool" className="h-5 w-5 text-brand" /> 2. Clean, Analyze & Visualize</h3>
+        <div className="mt-4 flex flex-wrap gap-2">
+          <button onClick={() => handleAction("clean")} disabled={loading} className="rounded-xl border border-line bg-surface2 px-4 py-2 text-sm font-medium text-fg hover:border-brand disabled:opacity-50 transition">Clean Data</button>
+          <button onClick={() => handleAction("stats")} disabled={loading} className="rounded-xl bg-teal-600 px-4 py-2 text-sm font-medium text-white hover:bg-teal-700 disabled:opacity-50 transition">Statistical Analysis</button>
+          <button onClick={() => handleAction("charts")} disabled={loading} className="rounded-xl bg-purple-600 px-4 py-2 text-sm font-medium text-white hover:bg-purple-700 disabled:opacity-50 transition">Generate Charts</button>
+        </div>
+      </Spot>
+
+      <Spot className="p-6">
+        <h3 className="font-display text-lg font-semibold flex items-center gap-2"><Icon name="code" className="h-5 w-5 text-brand" /> 3. Run SQL Query</h3>
+        <textarea 
+          value={sqlQuery}
+          onChange={(e) => setSqlQuery(e.target.value)}
+          rows={3}
+          className="mt-4 w-full rounded-xl border border-line bg-surface px-3.5 py-2.5 font-mono text-sm transition focus:border-brand focus:outline-2 focus:outline-brand/40"
+        />
+        <button onClick={handleSQL} disabled={!sqlQuery.trim() || loading} className="mt-3 rounded-xl bg-slate-800 px-4 py-2 text-sm font-medium text-white hover:bg-slate-900 disabled:opacity-50 transition">
+          Execute SQL
+        </button>
+      </Spot>
+
+      {renderResult()}
+    </div>
+  );
+}
+
+/* ───────────────────────── Code Documentation Component ───────────────────────── */
+
+function CodeDocumentation({ apiKey }: { apiKey: string }) {
+  const [path, setPath] = useState("");
+  const [file, setFile] = useState<File | null>(null);
+  const [result, setResult] = useState("");
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
+
+  const handlePathAction = async (action: "scan" | "readme") => {
+    if (!path.trim()) return;
+    setLoading(true); setError(""); setResult("");
+    try {
+      const res = await api<{ result: string }>(`/api/code/${action}`, apiKey, { 
+        method: "POST", 
+        body: JSON.stringify({ path: path.trim() }) 
+      });
+      setResult(res.result);
+    } catch (e) { setError((e as Error).message); }
+    setLoading(false);
+  };
+
+  const handleFileAction = async (action: "analyze" | "docstrings") => {
+    if (!file) return;
+    setLoading(true); setError(""); setResult("");
+    const formData = new FormData();
+    formData.append("file", file);
+    try {
+      const res = await api<{ result: string }>(`/api/code/${action}`, apiKey, { 
+        method: "POST", 
+        body: formData 
+      });
+      setResult(res.result);
+    } catch (e) { setError((e as Error).message); }
+    setLoading(false);
+  };
+
+  return (
+    <div className="mx-auto max-w-4xl space-y-6">
+      <div>
+        <h2 className="font-display text-3xl font-bold tracking-tight">Code Documentation</h2>
+        <p className="mt-1 text-muted">Scan codebases, analyze functions, generate READMEs, and add docstrings.</p>
+      </div>
+
+      {error && <div className="rounded-xl border border-danger/30 bg-danger/10 p-3 text-sm text-danger">{error}</div>}
+
+      <Spot className="p-6">
+        <h3 className="font-display text-lg font-semibold flex items-center gap-2"><Icon name="code" className="h-5 w-5 text-brand" /> 1. Scan Codebase / Generate README</h3>
+        <input 
+          value={path}
+          onChange={(e) => setPath(e.target.value)}
+          placeholder="e.g., C:\Users\win 11\ai-agent-project\study_companion"
+          className="mt-4 w-full rounded-xl border border-line bg-surface px-3.5 py-2.5 font-mono text-sm transition focus:border-brand focus:outline-2 focus:outline-brand/40"
+        />
+        <p className="mt-2 text-xs text-muted">Provide an absolute path to a directory.</p>
+        <div className="mt-3 flex flex-wrap gap-2">
+          <button onClick={() => handlePathAction("scan")} disabled={!path.trim() || loading} className="rounded-xl border border-line bg-surface2 px-4 py-2 text-sm font-medium text-fg hover:border-brand disabled:opacity-50 transition">Scan Codebase</button>
+          <button onClick={() => handlePathAction("readme")} disabled={!path.trim() || loading} className="rounded-xl bg-purple-600 px-4 py-2 text-sm font-medium text-white hover:bg-purple-700 disabled:opacity-50 transition">Generate README</button>
+        </div>
+      </Spot>
+
+      <Spot className="p-6">
+        <h3 className="font-display text-lg font-semibold flex items-center gap-2"><Icon name="upload" className="h-5 w-5 text-brand" /> 2. Analyze Functions / Write Docstrings</h3>
+        <div className="mt-4">
+          <input 
+            type="file" 
+            accept=".py"
+            onChange={(e) => setFile(e.target.files?.[0] || null)}
+            className="block w-full text-sm text-muted file:mr-4 file:rounded-xl file:border-0 file:bg-brand/10 file:px-4 file:py-2 file:text-sm file:font-semibold file:text-brand hover:file:bg-brand/20 transition"
+          />
+          <p className="mt-2 text-xs text-muted">Upload a Python (.py) file to analyze or add docstrings.</p>
+        </div>
+        <div className="mt-3 flex flex-wrap gap-2">
+          <button onClick={() => handleFileAction("analyze")} disabled={!file || loading} className="rounded-xl bg-teal-600 px-4 py-2 text-sm font-medium text-white hover:bg-teal-700 disabled:opacity-50 transition">Analyze Functions</button>
+          <button onClick={() => handleFileAction("docstrings")} disabled={!file || loading} className="rounded-xl bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700 disabled:opacity-50 transition">Write Docstrings</button>
+        </div>
+      </Spot>
+
+      {result && (
+        <Spot className="p-6 bg-surface2">
+          <h3 className="font-display text-lg font-semibold mb-3">Result</h3>
+          <pre className="whitespace-pre-wrap font-mono text-sm text-fg/90 max-h-[600px] overflow-y-auto">{result}</pre>
+        </Spot>
+      )}
+    </div>
+  );
+}
+
+/* ───────────────────────── app ───────────────────────── */
+
+function Shell() {
+  const [key, setKey] = useState(store.get("apikey") || "");
   const [tab, setTab] = useState<Tab>("dashboard");
   const [health, setHealth] = useState<Health | null>(null);
   const [mods, setMods] = useState<Mod[]>([]);
@@ -39,144 +788,233 @@ export default function App() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const [menu, setMenu] = useState(false);
-  const end = useRef<HTMLDivElement>(null);
+  const [stopped, setStopped] = useState(false);
+  const abortRef = useRef<AbortController | null>(null);
+  const list = useRef<HTMLDivElement>(null);
+  const area = useRef<HTMLTextAreaElement>(null);
+  const chatSeq = useRef(0);
+  const reduced = useReducedMotion();
+  const { dark, toggle } = useTheme();
+
+  const loadHealth = useCallback(async () => {
+    try {
+      const r = await fetch(API + "/api/health", { headers: { "ngrok-skip-browser-warning": "1" } });
+      if (!r.ok) throw new Error("unhealthy");
+      setHealth(await r.json());
+    } catch { setHealth(null); }
+  }, []);
 
   const refresh = useCallback(async () => {
-    try { setHealth(await (await fetch(API + "/api/health", { headers: { "ngrok-skip-browser-warning": "1" } })).json()); }
-    catch { setHealth(null); }
+    await loadHealth();
     if (!key) return;
     try {
       setMods(await api<Mod[]>("/api/modules", key));
       setConvs((await api<{ conversations: string[] }>(`/api/conversations?user_id=${USER}`, key)).conversations);
     } catch (e) {
-      if ((e as Error).message.includes("access key")) { localStorage.removeItem("apikey"); setKey(""); }
+      if ((e as Error).message.includes("access key")) { store.del("apikey"); setKey(""); }
     }
-  }, [key]);
+  }, [key, loadHealth]);
 
   useEffect(() => { refresh(); }, [refresh]);
-  useEffect(() => { end.current?.scrollIntoView({ behavior: "smooth" }); }, [msgs, loading]);
+
+  useEffect(() => {
+    const t = setInterval(() => { if (!document.hidden) loadHealth(); }, 30000);
+    return () => clearInterval(t);
+  }, [loadHealth]);
+
+  useEffect(() => {
+    const run = () => { const el = list.current; if (el) el.scrollTo({ top: el.scrollHeight, behavior: reduced ? "auto" : "smooth" }); };
+    run();
+    const t = setTimeout(run, 320);
+    return () => clearTimeout(t);
+  }, [msgs, loading, tab, reduced]);
+
+  useEffect(() => { window.scrollTo({ top: 0 }); setError(""); }, [tab]);
+  useEffect(() => {
+    if (!menu) return;
+    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") setMenu(false); };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [menu]);
+  useEffect(() => {
+    const a = area.current;
+    if (a) { a.style.height = "auto"; a.style.height = Math.min(a.scrollHeight, 160) + "px"; }
+  }, [input, tab]);
 
   const send = async () => {
     const text = input.trim();
     if (!text || loading) return;
-    setInput(""); setError(""); setLoading(true);
+    const seq = chatSeq.current;
+    const ctrl = new AbortController();
+    abortRef.current = ctrl;
+    setInput(""); setError(""); setStopped(false); setLoading(true);
     setMsgs(m => [...m, { role: "user", content: text }]);
     try {
       const r = await api<{ reply: string; conversation_id: string }>("/api/chat", key,
-        { method: "POST", body: JSON.stringify({ user_id: USER, conversation_id: convId, message: text }) });
-      setConvId(r.conversation_id);
-      setMsgs(m => [...m, { role: "assistant", content: r.reply }]);
+        { method: "POST", signal: ctrl.signal, body: JSON.stringify({ user_id: USER, conversation_id: convId, message: text }) });
+      if (seq === chatSeq.current) {
+        setConvId(r.conversation_id);
+        setMsgs(m => [...m, { role: "assistant", content: r.reply }]);
+      }
       refresh();
-    } catch (e) { setError(e instanceof TypeError ? "Cannot reach the backend. Is it running and is the tunnel URL current?" : (e as Error).message); }
-    finally { setLoading(false); }
+    } catch (e) {
+      if ((e as Error).name === "AbortError") {
+        if (seq === chatSeq.current) setStopped(true);
+        refresh();
+        return;
+      }
+      if (seq === chatSeq.current) setError(e instanceof TypeError ? "Cannot reach the backend. Is it running and is the tunnel URL current?" : (e as Error).message);
+    } finally {
+      if (seq === chatSeq.current) { setLoading(false); area.current?.focus(); }
+    }
   };
 
   const open = async (id: string) => {
     setError("");
+    const seq = ++chatSeq.current;
+    abortRef.current?.abort();
+    setLoading(false); setStopped(false);
     try {
       const r = await api<{ messages: Msg[] }>(`/api/conversations/${id}?user_id=${USER}`, key);
+      if (seq !== chatSeq.current) return;
       setMsgs(r.messages); setConvId(id); setTab("chat");
     } catch (e) { setError((e as Error).message); }
   };
-  const fresh = () => { setConvId(null); setMsgs([]); setError(""); };
+  const fresh = () => { chatSeq.current++; abortRef.current?.abort(); setLoading(false); setConvId(null); setMsgs([]); setError(""); setStopped(false); };
+  const stop = () => { abortRef.current?.abort(); };
+  const editLast = () => {
+    const idx = msgs.map(x => x.role).lastIndexOf("user");
+    if (idx < 0 || loading) return;
+    setInput(msgs[idx].content);
+    setMsgs(msgs.slice(0, idx));
+    setError(""); setStopped(false);
+    setTimeout(() => area.current?.focus(), 0);
+  };
 
-  if (!key) return (
-    <main className="min-h-screen grid place-items-center bg-slate-950 p-6 text-slate-100">
-      <form className="w-full max-w-sm space-y-4" onSubmit={e => { e.preventDefault(); if (keyInput.trim()) { localStorage.setItem("apikey", keyInput.trim()); setKey(keyInput.trim()); } }}>
-        <h1 className="text-2xl font-semibold">Enter access key</h1>
-        <p className="text-sm text-slate-400">This demo is private. Use the key set in the backend .env file.</p>
-        <input type="password" autoFocus value={keyInput} onChange={e => setKeyInput(e.target.value)} aria-label="Access key"
-          className="w-full rounded-lg border border-slate-700 bg-slate-900 px-3 py-2 focus:outline-2 focus:outline-teal-400" />
-        <button className="w-full rounded-lg bg-teal-500 py-2 font-medium text-slate-950 hover:bg-teal-400 focus:outline-2 focus:outline-offset-2 focus:outline-teal-300">Continue</button>
-      </form>
-    </main>);
+  if (!key) return <Gate dark={dark} onToggle={toggle} onSubmit={k => { store.set("apikey", k); setKey(k); }} />;
 
   const unavailable = (id: string) => mods.find(m => m.id === id);
+  const title = NAV.find(n => n[0] === tab)?.[1];
+  const lastUser = msgs.map(x => x.role).lastIndexOf("user");
 
   return (
-    <div className="flex min-h-screen bg-slate-50 text-slate-900">
-      <aside className={`${menu ? "block" : "hidden"} fixed inset-y-0 left-0 z-20 w-64 bg-slate-950 p-4 text-slate-300 md:static md:block`}>
-        <h2 className="mb-6 text-lg font-semibold text-white">MCA010 Agent</h2>
+    <div className="relative flex min-h-dvh bg-bg text-fg">
+      <Aurora />
+      <ScrollBar />
+
+      {menu && <button aria-label="Close menu" onClick={() => setMenu(false)} className="fixed inset-0 z-30 bg-black/50 backdrop-blur-sm md:hidden" />}
+
+      <aside className={`fixed inset-y-0 left-0 z-40 flex w-64 flex-col border-r border-line bg-surface p-4 transition-transform duration-300 md:sticky md:top-0 md:z-20 md:h-dvh md:translate-x-0 md:bg-surface/70 md:backdrop-blur-xl ${menu ? "translate-x-0" : "-translate-x-full"}`}>
+        <div className="mb-8 flex items-center gap-2.5 px-1">
+          <span aria-hidden className="h-7 w-7 rounded-lg bg-linear-to-br from-brand to-brand2 shadow-[0_0_20px_-4px_var(--brand)]" />
+          <h2 className="font-display text-lg font-semibold tracking-tight">MCA010 Agent</h2>
+        </div>
         <nav className="space-y-1">
           {NAV.map(([id, label]) => (
-            <button key={id} onClick={() => { setTab(id); setMenu(false); }}
-              className={`block w-full rounded-lg px-3 py-2 text-left focus:outline-2 focus:outline-teal-400 ${tab === id ? "bg-teal-500/20 text-teal-300" : "hover:bg-slate-800"}`}>{label}</button>))}
+            <button key={id} onClick={() => { setTab(id); setMenu(false); }} aria-current={tab === id ? "page" : undefined}
+              className={`relative flex w-full items-center gap-3 rounded-xl px-3 py-2 text-left transition-colors focus-visible:outline-2 focus-visible:outline-brand ${tab === id ? "text-brand" : "text-muted hover:text-fg"}`}>
+              {tab === id && <motion.span layoutId="nav-pill" className="absolute inset-0 rounded-xl bg-brand/12 ring-1 ring-brand/30" transition={{ type: "spring", stiffness: 420, damping: 34 }} />}
+              <Icon name={id} className="relative h-[18px] w-[18px]" /><span className="relative">{label}</span>
+            </button>))}
         </nav>
-        <button onClick={() => { localStorage.removeItem("apikey"); setKey(""); }} className="mt-8 text-sm text-slate-500 hover:text-slate-300">Change access key</button>
+        <button onClick={() => { store.del("apikey"); setKey(""); }} className="mt-auto px-1 text-left text-sm text-muted hover:text-fg focus-visible:outline-2 focus-visible:outline-brand">Change access key</button>
       </aside>
 
-      <main className="flex min-w-0 flex-1 flex-col">
-        <header className="flex items-center gap-3 border-b border-slate-200 bg-white px-4 py-3">
-          <button className="md:hidden rounded border px-2 py-1" aria-label="Menu" onClick={() => setMenu(v => !v)}>☰</button>
-          <h1 className="font-semibold">{NAV.find(n => n[0] === tab)?.[1]}</h1>
-          <span className="ml-auto flex items-center gap-2 text-sm text-slate-600"><Dot ok={!!health?.ollama} />{health?.ollama ? "Ollama online" : "Ollama offline"}</span>
+      <main className="relative z-10 flex min-w-0 flex-1 flex-col">
+        <header className="glass sticky top-0 z-30 flex h-14 items-center gap-3 border-b border-line px-4">
+          <button className="grid h-9 w-9 place-items-center rounded-lg border border-line md:hidden" aria-label="Menu" aria-expanded={menu} onClick={() => setMenu(v => !v)}><Icon name="menu" className="h-[18px] w-[18px]" /></button>
+          <AnimatePresence mode="wait" initial={false}>
+            <motion.h1 key={tab} initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -8 }} transition={{ duration: 0.18 }} className="font-display text-lg font-semibold">{title}</motion.h1>
+          </AnimatePresence>
+          <span className="ml-auto flex items-center gap-2 text-sm text-muted"><Dot ok={!!health?.ollama} />{health?.ollama ? "Ollama online" : "Ollama offline"}</span>
+          <ThemeToggle dark={dark} onToggle={toggle} />
         </header>
 
         <section className="flex-1 p-4 md:p-6">
-          {tab === "dashboard" && (
-            <div className="max-w-3xl space-y-6">
-              <div><h2 className="text-2xl font-semibold">Local LLM-Based AI Agent</h2>
-                <p className="mt-1 text-slate-600">Study assistance, data analysis, code documentation and x402 micropayments.</p></div>
-              <div className="grid gap-3 sm:grid-cols-3">
-                <div className="rounded-xl border bg-white p-4"><Dot ok={!!health} /> Backend<div className="text-sm text-slate-500">{health ? "Reachable" : "Unreachable"}</div></div>
-                <div className="rounded-xl border bg-white p-4"><Dot ok={!!health?.ollama} /> Ollama<div className="text-sm text-slate-500">{health?.ollama ? "Reachable" : "Not reachable"}</div></div>
-                <div className="rounded-xl border bg-white p-4"><Dot ok={!!health?.model_installed} /> Model<div className="text-sm text-slate-500">{health?.model ?? "qwen3:8b"} {health?.model_installed ? "installed" : "not found"}</div></div>
-              </div>
-              <ul className="divide-y rounded-xl border bg-white">
-                {mods.map(m => (<li key={m.id} className="flex items-start gap-3 p-3"><Dot ok={m.available} />
-                  <div><div className="font-medium">{m.name}</div><div className="text-sm text-slate-500">{m.note}</div></div></li>))}
-              </ul>
-              <button onClick={() => setTab("chat")} className="rounded-lg bg-teal-600 px-4 py-2 font-medium text-white hover:bg-teal-700 focus:outline-2 focus:outline-offset-2 focus:outline-teal-500">Open chat</button>
-            </div>)}
+          <AnimatePresence mode="wait" initial={false}>
+            <motion.div key={tab} initial={{ opacity: 0, y: 14 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -8 }} transition={{ duration: 0.22, ease: EASE }}>
 
-          {tab === "chat" && (
-            <div className="mx-auto flex h-[calc(100vh-7.5rem)] max-w-3xl flex-col">
-              <div className="mb-2 flex justify-end"><button onClick={fresh} className="rounded-lg border px-3 py-1 text-sm hover:bg-slate-100">Clear chat</button></div>
-              <div className="flex-1 space-y-3 overflow-y-auto rounded-xl border bg-white p-4" aria-live="polite">
-                {msgs.length === 0 && <p className="text-slate-500">Ask about the weather in a city, a calculation, or something from an earlier chat.</p>}
-                {msgs.map((m, i) => (
-                  <div key={i} className={`flex ${m.role === "user" ? "justify-end" : "justify-start"}`}>
-                    <div className={`max-w-[85%] whitespace-pre-wrap rounded-2xl px-4 py-2 ${m.role === "user" ? "bg-teal-600 text-white" : "bg-slate-100"}`}>{m.content}</div></div>))}
-                {loading && <p className="text-sm text-slate-500">Agent is thinking… local models can take a while.</p>}
-                <div ref={end} />
-              </div>
-              {error && <p role="alert" className="mt-2 rounded-lg bg-red-50 p-2 text-sm text-red-700">{error}</p>}
-              <form className="mt-3 flex gap-2" onSubmit={e => { e.preventDefault(); send(); }}>
-                <input value={input} onChange={e => setInput(e.target.value)} placeholder="Type a message" aria-label="Message" maxLength={4000}
-                  className="flex-1 rounded-lg border bg-white px-3 py-2 focus:outline-2 focus:outline-teal-500" />
-                <button disabled={loading || !input.trim()} className="rounded-lg bg-teal-600 px-4 py-2 font-medium text-white hover:bg-teal-700 disabled:opacity-50">Send</button>
-              </form>
-            </div>)}
+              {tab === "dashboard" && <Dashboard health={health} mods={mods} go={() => setTab("chat")} />}
 
-          {(["study", "data", "code", "pay"] as Tab[]).includes(tab) && (
-            <div className="max-w-xl rounded-xl border border-amber-300 bg-amber-50 p-5">
-              <h2 className="font-semibold">Not available yet</h2>
-              <p className="mt-1 text-sm text-slate-700">{unavailable(tab)?.note ?? "This module is not connected to the agent."} Nothing is simulated on this page.</p>
-              {tab === "pay" && <p className="mt-2 text-sm text-slate-700">No wallet is connected and no USDC can be spent from this website.</p>}
-            </div>)}
+              {tab === "chat" && (
+                <div className="mx-auto flex h-[calc(100dvh-3.5rem-2rem)] max-w-3xl flex-col md:h-[calc(100dvh-3.5rem-3rem)]">
+                  <div className="mb-2 flex items-center justify-between gap-3">
+                    <span className="truncate font-mono text-xs text-muted">{convId ? `conversation ${convId}` : "new conversation"}</span>
+                    <button onClick={fresh} className="rounded-lg border border-line px-3 py-1 text-sm text-muted transition hover:border-brand hover:text-fg focus-visible:outline-2 focus-visible:outline-brand">Clear chat</button>
+                  </div>
+                  <div ref={list} className="flex-1 space-y-4 overflow-y-auto rounded-2xl border border-line bg-surface/70 p-4 backdrop-blur" aria-live="polite">
+                    {msgs.length === 0 && !loading && <EmptyChat onPick={t => { setInput(t); area.current?.focus(); }} />}
+                    {msgs.map((m, i) => <Bubble key={i} m={m} onEdit={!loading && i === lastUser ? editLast : undefined} />)}
+                    {loading && <Typing />}
+                  </div>
+                  <AnimatePresence>
+                    {error && <motion.p role="alert" initial={{ opacity: 0, height: 0 }} animate={{ opacity: 1, height: "auto" }} exit={{ opacity: 0, height: 0 }}
+                      className="mt-2 overflow-hidden rounded-lg border border-danger/30 bg-danger/10 p-2.5 text-sm text-danger">{error}</motion.p>}
+                  </AnimatePresence>
+                  {stopped && !loading && <p className="mt-2 text-sm text-muted">Stopped. Edit your message or send a new one.</p>}
+                  <form className="mt-3 flex items-end gap-2" onSubmit={e => { e.preventDefault(); send(); }}>
+                    <div className="relative flex-1">
+                      <textarea ref={area} rows={1} value={input} onChange={e => setInput(e.target.value)} placeholder="Type a message" aria-label="Message" maxLength={4000}
+                        onKeyDown={e => {
+                          if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) { e.preventDefault(); send(); }
+                          else if (e.key === "Escape" && loading) stop();
+                        }}
+                        className="block max-h-40 w-full resize-none rounded-xl border border-line bg-surface px-3.5 py-2.5 transition placeholder:text-muted focus:border-brand focus:outline-2 focus:outline-brand/40" />
+                      {input.length > 3400 && <span className="absolute -top-5 right-1 font-mono text-xs text-muted">{input.length}/4000</span>}
+                    </div>
+                    {loading ? (
+                      <motion.button key="stop" type="button" onClick={stop} whileTap={{ scale: 0.94 }} aria-label="Stop generating"
+                        className="flex h-[42px] items-center gap-2 rounded-xl border border-danger/50 bg-danger/10 px-4 font-medium text-danger transition hover:bg-danger/20 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-danger">
+                        <span className="hidden sm:inline">Stop</span><Icon name="stop" className="h-[18px] w-[18px]" />
+                      </motion.button>
+                    ) : (
+                      <motion.button key="send" whileTap={{ scale: 0.94 }} disabled={!input.trim()} aria-label="Send"
+                        className="flex h-[42px] items-center gap-2 rounded-xl bg-brand px-4 font-medium text-brandfg transition disabled:opacity-40 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-brand">
+                        <span className="hidden sm:inline">Send</span><Icon name="send" className="h-[18px] w-[18px]" />
+                      </motion.button>)}
+                  </form>
+                  <p className="mt-1.5 hidden text-xs text-muted sm:block">Enter to send · Shift+Enter for a new line · Esc to stop</p>
+                </div>)}
 
-          {tab === "history" && (
-            <div className="max-w-xl">
-              {error && <p role="alert" className="mb-2 text-sm text-red-700">{error}</p>}
-              {convs.length === 0 ? <p className="text-slate-500">No saved conversations yet. Start one in AI Chat.</p> :
-                <ul className="divide-y rounded-xl border bg-white">{convs.map(c => (
-                  <li key={c}><button onClick={() => open(c)} className="w-full px-4 py-3 text-left hover:bg-slate-50 focus:outline-2 focus:outline-teal-500">{c}</button></li>))}</ul>}
-            </div>)}
+              {tab === "study" && <StudyCompanion apiKey={key} />}
 
-          {tab === "about" && (
-            <div className="max-w-2xl space-y-4">
-              <h2 className="text-2xl font-semibold">About this project</h2>
-              <p>Local LLM-Based AI Agent for Study Assistance, Data Analysis, Code Documentation and x402 Micropayments. MCA010, JSS University, Noida, Session 2025–26.</p>
-              <pre className="overflow-x-auto rounded-xl bg-slate-950 p-4 text-sm text-teal-300">{`Browser (React, Vercel)
-   ↓ HTTPS + access key
-Tunnel (Cloudflare / ngrok)
-   ↓
-FastAPI backend  →  run_agent() + tools + conversation_store
-   ↓ localhost only
-Ollama (qwen3:8b)`}</pre>
-              <p className="text-sm text-slate-600">Stack: React, Vite, TypeScript, Tailwind CSS, FastAPI, Python, Ollama, Open-Meteo.</p>
-            </div>)}
+              {tab === "data" && <DataAnalysis apiKey={key} />}
+
+              {tab === "code" && <CodeDocumentation apiKey={key} />}
+
+              {(["pay"] as Tab[]).includes(tab) && (
+                <div className="mx-auto max-w-xl pt-6">
+                  <div className="rounded-2xl border border-warn/40 bg-warn/10 p-6">
+                    <h2 className="font-display text-xl font-semibold">Not available yet</h2>
+                    <p className="mt-2 text-sm leading-relaxed">{unavailable(tab)?.note ?? "This module is not connected to the agent."} Nothing is simulated on this page.</p>
+                    <p className="mt-2 text-sm leading-relaxed">No wallet is connected and no USDC can be spent from this website.</p>
+                  </div>
+                </div>)}
+
+              {tab === "history" && (
+                <div className="mx-auto max-w-xl">
+                  {error && <p role="alert" className="mb-3 text-sm text-danger">{error}</p>}
+                  {convs.length === 0 ? <p className="text-muted">No saved conversations yet. Start one in AI Chat.</p> : (
+                    <Stagger className="space-y-2">
+                      {convs.map(c => (
+                        <motion.div key={c} variants={rise}>
+                          <button onClick={() => open(c)} className="group flex w-full items-center gap-3 rounded-xl border border-line bg-surface/80 px-4 py-3 text-left transition hover:border-brand hover:bg-surface focus-visible:outline-2 focus-visible:outline-brand">
+                            <Icon name="chat" className="h-[18px] w-[18px] text-muted group-hover:text-brand" /><span className="min-w-0 flex-1 truncate font-mono text-sm">{c}</span>
+                            <Icon name="chevron" className="h-4 w-4 text-muted transition group-hover:translate-x-1 group-hover:text-brand" />
+                          </button>
+                        </motion.div>))}
+                    </Stagger>)}
+                </div>)}
+
+              {tab === "about" && <About />}
+
+            </motion.div>
+          </AnimatePresence>
         </section>
       </main>
     </div>);
+}
+
+export default function App() {
+  return <MotionConfig reducedMotion="user"><Shell /></MotionConfig>;
 }

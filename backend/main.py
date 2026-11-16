@@ -19,6 +19,8 @@ from study_companion.study_tools import load_pdf, search_documents, generate_fla
 from study_companion.data_tools import load_data, clean_data, run_sql_query, generate_charts, statistical_analysis
 # Code Documentation Imports
 from study_companion.code_tools import scan_codebase, analyze_functions, generate_readme, write_docstrings
+# x402 Payment Imports
+from study_companion.payment_tools import get_balance, get_pricing, deduct_payment, get_transactions, reset_wallet
 
 load_dotenv()
 log = logging.getLogger("backend")
@@ -92,7 +94,7 @@ def modules():
         {"id": "study", "name": "Study Companion", "available": True, "note": "Upload PDF, Search, Generate Flashcards & Quizzes."},
         {"id": "data", "name": "Data Analysis", "available": True, "note": "Upload CSV/Excel, Clean, SQL Queries, Charts & Stats."},
         {"id": "code", "name": "Code Documentation", "available": True, "note": "Scan codebase, analyze functions, generate README, write docstrings."},
-        {"id": "pay", "name": "x402 Payments", "available": False, "note": "Not implemented. No payments are made."},
+        {"id": "pay", "name": "x402 Payments", "available": True, "note": "Manage mock USDC wallet, view pricing and transactions."},
     ]
 
 
@@ -118,6 +120,13 @@ def chat(req: ChatIn):
     cid = req.conversation_id or "chat_" + datetime.now().strftime("%Y%m%d_%H%M%S")
     check_ids(uid, cid)
     key = (uid, cid)
+    
+    # Optional: Payment check for specific tool usage (e.g., weather)
+    if "weather" in req.message.lower():
+        payment = deduct_payment("Real-time Info (Weather)", 0.02)
+        if not payment["success"]:
+            raise HTTPException(402, payment["message"])
+    
     try:
         with LOCK:
             history = load_conversation(uid, cid) if cid in list_conversations(uid) else []
@@ -149,6 +158,12 @@ def chat(req: ChatIn):
 
 @app.post("/api/study/upload", dependencies=[Depends(auth)])
 async def upload_pdf(file: UploadFile = File(...)):
+    # --- x402 PAYMENT CHECK ---
+    payment = deduct_payment("Study Companion (PDF Upload)", 0.05)
+    if not payment["success"]:
+        raise HTTPException(402, payment["message"])
+    # --------------------------
+    
     temp_dir = "temp_uploads"
     os.makedirs(temp_dir, exist_ok=True)
     file_path = os.path.join(temp_dir, file.filename)
@@ -215,6 +230,12 @@ async def data_sql(query: str = Form(...)):
 
 @app.post("/api/data/charts", dependencies=[Depends(auth)])
 async def data_charts():
+    # --- x402 PAYMENT CHECK ---
+    payment = deduct_payment("Data Analysis (Charts)", 0.10)
+    if not payment["success"]:
+        raise HTTPException(402, payment["message"])
+    # --------------------------
+    
     return {"result": generate_charts()}
 
 
@@ -239,7 +260,12 @@ async def code_readme(req: PathRequest):
 
 @app.post("/api/code/analyze", dependencies=[Depends(auth)])
 async def code_analyze(file: UploadFile = File(...)):
-    # Save uploaded .py file temporarily
+    # --- x402 PAYMENT CHECK ---
+    payment = deduct_payment("Code Documentation (Analyze)", 0.05)
+    if not payment["success"]:
+        raise HTTPException(402, payment["message"])
+    # --------------------------
+    
     with tempfile.NamedTemporaryFile(delete=False, suffix=".py") as tmp:
         shutil.copyfileobj(file.file, tmp)
         tmp_path = tmp.name
@@ -254,6 +280,12 @@ async def code_analyze(file: UploadFile = File(...)):
 
 @app.post("/api/code/docstrings", dependencies=[Depends(auth)])
 async def code_docstrings(file: UploadFile = File(...)):
+    # --- x402 PAYMENT CHECK ---
+    payment = deduct_payment("Code Documentation (Docstrings)", 0.05)
+    if not payment["success"]:
+        raise HTTPException(402, payment["message"])
+    # --------------------------
+    
     with tempfile.NamedTemporaryFile(delete=False, suffix=".py") as tmp:
         shutil.copyfileobj(file.file, tmp)
         tmp_path = tmp.name
@@ -264,3 +296,24 @@ async def code_docstrings(file: UploadFile = File(...)):
         os.remove(tmp_path)
     
     return {"result": result}
+
+
+# ==========================================
+# x402 PAYMENTS ENDPOINTS
+# ==========================================
+
+@app.get("/api/payments/balance", dependencies=[Depends(auth)])
+async def payment_balance():
+    return get_balance()
+
+@app.get("/api/payments/pricing", dependencies=[Depends(auth)])
+async def payment_pricing():
+    return get_pricing()
+
+@app.get("/api/payments/transactions", dependencies=[Depends(auth)])
+async def payment_transactions():
+    return get_transactions()
+
+@app.post("/api/payments/reset", dependencies=[Depends(auth)])
+async def payment_reset():
+    return reset_wallet()

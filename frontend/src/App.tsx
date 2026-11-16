@@ -774,6 +774,103 @@ function CodeDocumentation({ apiKey }: { apiKey: string }) {
   );
 }
 
+/* ───────────────────────── x402 Payments Component ───────────────────────── */
+
+function PaymentsDashboard({ apiKey }: { apiKey: string }) {
+  const [balance, setBalance] = useState<number>(0);
+  const [pricing, setPricing] = useState<any[]>([]);
+  const [transactions, setTransactions] = useState<any[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
+
+  const fetchData = async () => {
+    setLoading(true); setError("");
+    try {
+      const b = await api<{ balance: number }>("/api/payments/balance", apiKey);
+      const p = await api<{ pricing: any[] }>("/api/payments/pricing", apiKey);
+      const t = await api<{ transactions: any[] }>("/api/payments/transactions", apiKey);
+      setBalance(b.balance);
+      setPricing(p.pricing);
+      setTransactions(t.transactions);
+    } catch (e) { setError((e as Error).message); }
+    setLoading(false);
+  };
+
+  useEffect(() => { fetchData(); }, []);
+
+  const handleReset = async () => {
+    setLoading(true);
+    try {
+      await api("/api/payments/reset", apiKey, { method: "POST" });
+      fetchData();
+    } catch (e) { setError((e as Error).message); }
+    setLoading(false);
+  };
+
+  return (
+    <div className="mx-auto max-w-4xl space-y-6">
+      <div className="flex items-center justify-between">
+        <div>
+          <h2 className="font-display text-3xl font-bold tracking-tight">x402 Payments</h2>
+          <p className="mt-1 text-muted">Manage your mock USDC wallet and view transaction history.</p>
+        </div>
+        <button onClick={handleReset} disabled={loading} className="rounded-xl border border-line px-4 py-2 text-sm text-muted hover:border-brand hover:text-fg transition">
+          Reset Wallet (10 USDC)
+        </button>
+      </div>
+
+      {error && <div className="rounded-xl border border-danger/30 bg-danger/10 p-3 text-sm text-danger">{error}</div>}
+
+      <div className="grid gap-4 md:grid-cols-2">
+        <Spot className="p-6 bg-linear-to-br from-brand/10 to-transparent">
+          <h3 className="text-muted font-medium">Current Balance</h3>
+          <div className="mt-2 text-4xl font-bold text-brand">{balance.toFixed(2)} <span className="text-xl text-muted">USDC</span></div>
+        </Spot>
+
+        <Spot className="p-6">
+          <h3 className="font-display text-lg font-semibold mb-3">Pricing (x402 Protocol)</h3>
+          <ul className="space-y-2">
+            {pricing.map((p, i) => (
+              <li key={i} className="flex justify-between items-center text-sm border-b border-line/50 pb-2">
+                <span>{p.feature}</span>
+                <span className="font-mono text-brand">{p.price} USDC</span>
+              </li>
+            ))}
+          </ul>
+        </Spot>
+      </div>
+
+      <Spot className="p-6">
+        <h3 className="font-display text-lg font-semibold mb-3">Transaction History</h3>
+        {transactions.length === 0 ? (
+          <p className="text-muted text-sm">No transactions yet. Use a premium feature to see history.</p>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="w-full text-sm text-left">
+              <thead>
+                <tr className="border-b border-line text-muted">
+                  <th className="pb-2">ID</th><th className="pb-2">Feature</th><th className="pb-2">Amount</th><th className="pb-2">Time</th><th className="pb-2">Status</th>
+                </tr>
+              </thead>
+              <tbody>
+                {transactions.map((t, i) => (
+                  <tr key={i} className="border-b border-line/30">
+                    <td className="py-2 font-mono text-xs">{t.id}</td>
+                    <td className="py-2">{t.feature}</td>
+                    <td className="py-2 font-mono text-danger">-{t.amount} USDC</td>
+                    <td className="py-2 text-muted">{t.timestamp}</td>
+                    <td className="py-2 text-green-500">{t.status}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </Spot>
+    </div>
+  );
+}
+
 /* ───────────────────────── app ───────────────────────── */
 
 function Shell() {
@@ -982,14 +1079,7 @@ function Shell() {
 
               {tab === "code" && <CodeDocumentation apiKey={key} />}
 
-              {(["pay"] as Tab[]).includes(tab) && (
-                <div className="mx-auto max-w-xl pt-6">
-                  <div className="rounded-2xl border border-warn/40 bg-warn/10 p-6">
-                    <h2 className="font-display text-xl font-semibold">Not available yet</h2>
-                    <p className="mt-2 text-sm leading-relaxed">{unavailable(tab)?.note ?? "This module is not connected to the agent."} Nothing is simulated on this page.</p>
-                    <p className="mt-2 text-sm leading-relaxed">No wallet is connected and no USDC can be spent from this website.</p>
-                  </div>
-                </div>)}
+              {tab === "pay" && <PaymentsDashboard apiKey={key} />}
 
               {tab === "history" && (
                 <div className="mx-auto max-w-xl">

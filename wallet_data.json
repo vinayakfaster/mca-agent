@@ -1,0 +1,26 @@
+{
+    "balance": 9.849999999999998,
+    "transactions": [
+        {
+            "id": "txn_1794848927",
+            "feature": "Study Companion (PDF Upload)",
+            "amount": 0.05,
+            "timestamp": "2026-11-16 22:38:47",
+            "status": "Success"
+        },
+        {
+            "id": "txn_1794848963",
+            "feature": "Study Companion (PDF Upload)",
+            "amount": 0.05,
+            "timestamp": "2026-11-16 22:39:23",
+            "status": "Success"
+        },
+        {
+            "id": "txn_1794851122",
+            "feature": "Code Documentation (Analyze)",
+            "amount": 0.05,
+            "timestamp": "2026-11-16 23:15:22",
+            "status": "Success"
+        }
+    ]
+}
